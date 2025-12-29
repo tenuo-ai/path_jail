@@ -4,8 +4,15 @@
 [![Crates.io](https://img.shields.io/crates/v/path_jail.svg)](https://crates.io/crates/path_jail)
 [![docs.rs](https://img.shields.io/docsrs/path_jail)](https://docs.rs/path_jail)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/aimable100/path_jail#license)
+[![MSRV](https://img.shields.io/badge/MSRV-1.70-blue.svg)](https://github.com/aimable100/path_jail)
 
 A zero-dependency filesystem sandbox for Rust. Restricts paths to a root directory, preventing traversal attacks while supporting files that don't exist yet.
+
+## Installation
+
+```bash
+cargo add path_jail
+```
 
 ## The Problem
 
@@ -62,8 +69,6 @@ let path2 = jail.join("data.csv")?;
 
 This library validates paths. It does not hold file descriptors.
 
-There is a **TOCTOU (time-of-check time-of-use)** race condition. If an attacker has write access to the jail directory, they could swap a directory with a symlink between validation and use.
-
 **Defends against:**
 - Logic errors in path construction
 - Confused deputy attacks from untrusted input
@@ -72,6 +77,95 @@ There is a **TOCTOU (time-of-check time-of-use)** race condition. If an attacker
 - Malicious local processes racing your I/O
 
 For kernel-enforced sandboxing, use [`cap-std`](https://docs.rs/cap-std).
+
+### Platform-Specific Edge Cases
+
+#### Hard Links
+
+Hard links cannot be detected by path inspection. If an attacker has shell access and creates a hard link to a sensitive file inside your jail, path_jail will allow access.
+
+**Mitigations:**
+- Use a separate partition for the jail (hard links cannot cross partitions)
+- Use container isolation
+
+#### TOCTOU Race Conditions
+
+path_jail validates paths at call time. A symlink could be created between validation and use:
+
+```rust
+let path = jail.join("file.txt")?;  // Validated
+// Attacker creates symlink here
+std::fs::write(&path, data)?;        // Escapes!
+```
+
+**Mitigations:**
+- Use `O_NOFOLLOW` when opening files
+- Use container/chroot isolation
+
+#### Windows Reserved Device Names
+
+On Windows, filenames like `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` are special device names.
+
+```rust
+let path = jail.join("CON.txt")?;   // Returns C:\uploads\CON.txt
+std::fs::File::open(&path)?;         // Opens console device, not file!
+```
+
+**Impact:** Denial of Service (not a filesystem escape).
+
+**Mitigation:** Validate filenames against a blocklist before calling path_jail, or use UUIDs for stored filenames.
+
+#### Unicode Normalization (macOS)
+
+macOS automatically converts filenames to NFD (decomposed) form. A file saved as `café.txt` (composed) may be stored as `café.txt` (decomposed).
+
+**Impact:** Not a security issue, but may cause "file not found" if comparing filenames byte-for-byte.
+
+#### Case Sensitivity (Windows/macOS)
+
+Windows and macOS (by default) have case-insensitive filesystems:
+
+```rust
+jail.join("FILE.txt")?;  // Points to same file as "file.txt"
+```
+
+**Mitigation:** Normalize case before blocklist checks.
+
+#### Trailing Dots and Spaces (Windows)
+
+Windows silently strips trailing dots and spaces:
+
+```rust
+jail.join("file.txt.")?;   // Becomes "file.txt"
+jail.join("file.txt ")?;   // Becomes "file.txt"
+```
+
+**Mitigation:** Strip trailing dots/spaces before validation.
+
+#### Alternate Data Streams (Windows NTFS)
+
+NTFS supports alternate data streams: `file.txt:hidden`. Consider rejecting filenames containing `:`.
+
+#### Special Filesystems (Linux)
+
+Avoid using path_jail with special filesystem roots like `/proc` or `/dev` (contain symlinks to sensitive locations).
+
+### Path Canonicalization
+
+All returned paths are canonicalized (symlinks resolved, `..` eliminated):
+
+```rust
+// macOS: /var is a symlink to /private/var
+let jail = Jail::new("/var/uploads")?;
+assert!(jail.root().starts_with("/private/var"));
+
+// Windows: Long paths (>260 chars) use \\?\ prefix
+let long_name = "a".repeat(300);
+let path = jail.join(&long_name)?;
+assert!(path.to_string_lossy().starts_with(r"\\?\"));
+```
+
+When comparing paths, always canonicalize your expected values.
 
 ## API
 
@@ -101,6 +195,117 @@ let verified: PathBuf = jail.contains("/var/uploads/file.txt")?;
 
 // Get relative path for database storage
 let rel: PathBuf = jail.relative(&path)?;  // "subdir/file.txt"
+```
+
+## Error Handling
+
+```rust
+use path_jail::{Jail, JailError};
+
+let jail = Jail::new("/var/uploads")?;
+
+match jail.join(user_input) {
+    Ok(path) => {
+        // Safe to use
+        std::fs::write(&path, data)?;
+    }
+    Err(JailError::EscapedRoot { attempted, root }) => {
+        // Path traversal attempt
+        eprintln!("Blocked: {} escapes {}", attempted.display(), root.display());
+    }
+    Err(JailError::BrokenSymlink(path)) => {
+        // Symlink target doesn't exist (can't verify it's safe)
+        eprintln!("Broken symlink: {}", path.display());
+    }
+    Err(JailError::InvalidPath(reason)) => {
+        // Absolute path or other invalid input
+        eprintln!("Invalid: {}", reason);
+    }
+    Err(JailError::Io(e)) => {
+        // Filesystem error (e.g., permission denied)
+        eprintln!("I/O error: {}", e);
+    }
+}
+```
+
+## Example: File Uploads
+
+```rust
+use path_jail::Jail;
+use std::path::PathBuf;
+
+struct UploadService {
+    jail: Jail,
+}
+
+impl UploadService {
+    fn new(root: &str) -> Result<Self, path_jail::JailError> {
+        Ok(Self { jail: Jail::new(root)? })
+    }
+
+    fn save(&self, user_id: &str, filename: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+        let path = self.jail.join(format!("{}/{}", user_id, filename))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, data)?;
+        Ok(path)
+    }
+}
+```
+
+## Framework Integration
+
+### Axum
+
+```rust
+use axum::{extract::Path, http::StatusCode, response::IntoResponse};
+use bytes::Bytes;
+use path_jail::Jail;
+use std::sync::LazyLock;
+
+static UPLOADS: LazyLock<Jail> = LazyLock::new(|| {
+    Jail::new("/var/uploads").expect("uploads dir must exist")
+});
+
+async fn upload(
+    Path(filename): Path<String>,
+    body: Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
+    let path = UPLOADS.join(&filename).map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    std::fs::write(&path, &body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    Ok(StatusCode::CREATED)
+}
+```
+
+### Actix-web
+
+```rust
+use actix_web::{web, HttpResponse, Result};
+use path_jail::Jail;
+use std::sync::LazyLock;
+
+static UPLOADS: LazyLock<Jail> = LazyLock::new(|| {
+    Jail::new("/var/uploads").expect("uploads dir must exist")
+});
+
+async fn upload(
+    path: web::Path<String>,
+    body: web::Bytes,
+) -> Result<HttpResponse> {
+    let safe_path = UPLOADS.join(path.as_str())
+        .map_err(|_| actix_web::error::ErrorBadRequest("invalid path"))?;
+    
+    std::fs::write(&safe_path, &body)?;
+    Ok(HttpResponse::Created().finish())
+}
 ```
 
 ## Want Type-Safe Paths?
@@ -144,6 +349,38 @@ This makes "confused deputy" bugs a compile error: you cannot accidentally pass 
 
 - [`strict-path`](https://crates.io/crates/strict-path) - More comprehensive, uses marker types for compile-time guarantees
 - [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but different API than `std::fs`
+
+## Thread Safety
+
+`Jail` implements `Clone`, `Send`, and `Sync`. It can be safely shared across threads:
+
+```rust
+use std::sync::Arc;
+use path_jail::Jail;
+
+let jail = Arc::new(Jail::new("/var/uploads")?);
+
+let jail_clone = Arc::clone(&jail);
+std::thread::spawn(move || {
+    let path = jail_clone.join("file.txt").unwrap();
+    // ...
+});
+```
+
+## MSRV
+
+Minimum Supported Rust Version: **1.70**
+
+This crate will always support at least the last 6 months of Rust stable releases.
+
+## Development
+
+```bash
+git clone https://github.com/aimable100/path_jail.git
+cd path_jail
+cargo test
+cargo clippy
+```
 
 ## License
 
