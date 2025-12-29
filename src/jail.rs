@@ -47,7 +47,6 @@ impl Jail {
                     if current.exists() {
                         current = self.verify_inside(current)?;
                     } else if current.is_symlink() {
-                        // Broken symlink - reject (cannot verify target is inside jail)
                         return Err(JailError::BrokenSymlink(current));
                     }
                 }
@@ -64,7 +63,6 @@ impl Jail {
                     if current.exists() {
                         current = self.verify_inside(current)?;
                     } else if current.is_symlink() {
-                        // Broken symlink - reject (cannot verify target is inside jail)
                         return Err(JailError::BrokenSymlink(current));
                     }
                 }
