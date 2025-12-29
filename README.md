@@ -8,6 +8,8 @@
 
 A zero-dependency filesystem sandbox for Rust. Restricts paths to a root directory, preventing traversal attacks while supporting files that don't exist yet.
 
+**Python bindings:** [`path-jail`](https://github.com/aimable100/path-jail-python) on PyPI
+
 ## Installation
 
 ```bash
