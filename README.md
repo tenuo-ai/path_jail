@@ -19,17 +19,22 @@ if !path.starts_with(&root) {
 ## The Solution
 
 ```rust
-use path_jail::Jail;
-
-let jail = Jail::new("/var/uploads")?;
-
-// Safe: returns Ok("/var/uploads/2025/report.pdf")
-// Works even if the file doesn't exist yet!
-let path = jail.join("2025/report.pdf")?;
+// One-liner for simple cases
+let path = path_jail::join("/var/uploads", user_input)?;
 std::fs::write(&path, data)?;
 
 // Blocked: returns Err(EscapedRoot)
-jail.join("../../etc/passwd")?;
+path_jail::join("/var/uploads", "../../etc/passwd")?;
+```
+
+For multiple paths, create a `Jail` and reuse it:
+
+```rust
+use path_jail::Jail;
+
+let jail = Jail::new("/var/uploads")?;
+let path1 = jail.join("report.pdf")?;
+let path2 = jail.join("data.csv")?;
 ```
 
 ## Features
@@ -45,6 +50,8 @@ jail.join("../../etc/passwd")?;
 |--------|---------|---------|
 | Path traversal | `../../etc/passwd` | Yes |
 | Symlink escape | `link -> /etc` | Yes |
+| Symlink chains | `a -> b -> /etc` | Yes |
+| Broken symlinks | `link -> /nonexistent` | Yes |
 | Absolute injection | `/etc/passwd` | Yes |
 | Parent escape | `foo/../../secret` | Yes |
 
@@ -65,8 +72,17 @@ For kernel-enforced sandboxing, use [`cap-std`](https://docs.rs/cap-std).
 
 ## API
 
+### One-shot validation
+
 ```rust
-use path_jail::{Jail, JailError};
+// Validate and join in one call
+let safe: PathBuf = path_jail::join("/var/uploads", "subdir/file.txt")?;
+```
+
+### Reusable jail
+
+```rust
+use path_jail::Jail;
 
 // Create a jail (root must exist and be a directory)
 let jail = Jail::new("/var/uploads")?;
@@ -79,6 +95,9 @@ let path: PathBuf = jail.join("subdir/file.txt")?;
 
 // Check if an absolute path is inside the jail
 let verified: PathBuf = jail.contains("/var/uploads/file.txt")?;
+
+// Get relative path for database storage
+let rel: PathBuf = jail.relative(&path)?;  // "subdir/file.txt"
 ```
 
 ## Alternatives
@@ -96,11 +115,11 @@ let verified: PathBuf = jail.contains("/var/uploads/file.txt")?;
 
 ## Roadmap
 
-- [x] Core path validation (`join`, `contains`)
-- [x] Symlink resolution
+- [x] Core path validation (`join`, `contains`, `relative`)
+- [x] Symlink resolution (including chains and broken symlinks)
 - [x] Error types with context
+- [x] Comprehensive security tests (22 tests)
 - [ ] I/O helpers (`read`, `write`, `create_dir_all`)
-- [ ] More comprehensive tests
 
 ## License
 

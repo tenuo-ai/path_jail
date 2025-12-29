@@ -47,6 +47,9 @@ impl Jail {
                     // If it exists, resolve symlinks and check bounds
                     if current.exists() {
                         current = self.verify_inside(current)?;
+                    } else if current.is_symlink() {
+                        // Broken symlink - reject (cannot verify target is inside jail)
+                        return Err(JailError::BrokenSymlink(current));
                     }
                 }
                 Component::ParentDir => {
@@ -61,6 +64,9 @@ impl Jail {
                     // Re-verify after pop (parent might be a symlink)
                     if current.exists() {
                         current = self.verify_inside(current)?;
+                    } else if current.is_symlink() {
+                        // Broken symlink - reject (cannot verify target is inside jail)
+                        return Err(JailError::BrokenSymlink(current));
                     }
                 }
                 Component::CurDir => {} // Ignore "."
@@ -95,6 +101,50 @@ impl Jail {
             return Err(JailError::InvalidPath("path must be absolute".into()));
         }
         self.verify_inside(absolute.to_path_buf())
+    }
+
+    /// Get the relative path from an absolute path inside the jail.
+    ///
+    /// This is the inverse of [`join`](Self::join): it takes an absolute path
+    /// and returns the relative portion within the jail. Useful for storing
+    /// portable paths in a database.
+    ///
+    /// The path must exist (for symlink resolution). For non-existent paths,
+    /// keep the original relative path you passed to [`join`](Self::join).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use path_jail::Jail;
+    ///
+    /// let jail = Jail::new("/var/uploads")?;
+    /// let abs = jail.join("2025/report.pdf")?;
+    /// std::fs::write(&abs, b"data")?;  // Create the file
+    ///
+    /// // Get the relative path for database storage
+    /// let rel = jail.relative(&abs)?;
+    /// assert_eq!(rel, std::path::Path::new("2025/report.pdf"));
+    /// # Ok::<(), path_jail::JailError>(())
+    /// ```
+    pub fn relative<P: AsRef<Path>>(&self, absolute: P) -> Result<PathBuf, JailError> {
+        let path = absolute.as_ref();
+        
+        let resolved = if path.is_absolute() {
+            // Absolute paths must exist (for symlink verification)
+            self.verify_inside(path.to_path_buf())?
+        } else {
+            // Relative paths: resolve via join() to normalize
+            self.join(path)?
+        };
+        
+        // Strip the jail root to get the relative path
+        resolved
+            .strip_prefix(&self.root)
+            .map(|p| p.to_path_buf())
+            .map_err(|_| JailError::EscapedRoot {
+                attempted: path.to_path_buf(),
+                root: self.root.clone(),
+            })
     }
 
 }
