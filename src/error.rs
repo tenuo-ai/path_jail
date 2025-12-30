@@ -10,6 +10,8 @@ pub enum JailError {
     BrokenSymlink(PathBuf),
     /// Path is invalid (e.g., contains absolute components).
     InvalidPath(String),
+    /// Jail root is invalid (e.g., filesystem root like `/` or `C:\`).
+    InvalidRoot(PathBuf),
     /// Underlying I/O error.
     Io(std::io::Error),
 }
@@ -33,6 +35,16 @@ impl fmt::Display for JailError {
                 )
             }
             Self::InvalidPath(reason) => write!(f, "invalid path: {}", reason),
+            Self::InvalidRoot(path) => {
+                let reason = if path.parent().is_none() {
+                    "cannot use filesystem root"
+                } else if !path.is_dir() {
+                    "not a directory"
+                } else {
+                    "invalid"
+                };
+                write!(f, "invalid jail root '{}' ({})", path.display(), reason)
+            }
             Self::Io(err) => write!(f, "io error: {}", err),
         }
     }

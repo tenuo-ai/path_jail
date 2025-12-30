@@ -2,6 +2,102 @@ use path_jail::Jail;
 use std::fs;
 use tempfile::tempdir;
 
+#[test]
+fn rejects_filesystem_root() {
+    use path_jail::JailError;
+
+    // Cannot use filesystem root as jail (defeats the purpose)
+    #[cfg(unix)]
+    {
+        let err = Jail::new("/").unwrap_err();
+        assert!(matches!(err, JailError::InvalidRoot(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("filesystem root"));
+    }
+
+    #[cfg(windows)]
+    {
+        let err = Jail::new("C:\\").unwrap_err();
+        assert!(matches!(err, JailError::InvalidRoot(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("filesystem root"));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn invalid_root_captures_path() {
+    use path_jail::JailError;
+    use std::path::Path;
+
+    // Verify the error captures the canonicalized path
+    let err = Jail::new("/").unwrap_err();
+    if let JailError::InvalidRoot(path) = err {
+        assert_eq!(path, Path::new("/"));
+    } else {
+        panic!("Expected InvalidRoot error");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn rejects_root_variations() {
+    // Various ways to spell filesystem root should all be rejected
+    assert!(Jail::new("/").is_err());
+    assert!(Jail::new("//").is_err());      // Canonicalizes to /
+    assert!(Jail::new("/.").is_err());      // Canonicalizes to /
+    assert!(Jail::new("/./").is_err());     // Canonicalizes to /
+}
+
+#[test]
+fn join_function_rejects_root() {
+    // The convenience function should also reject filesystem root
+    #[cfg(unix)]
+    {
+        let err = path_jail::join("/", "file.txt");
+        assert!(err.is_err());
+    }
+
+    #[cfg(windows)]
+    {
+        let err = path_jail::join("C:\\", "file.txt");
+        assert!(err.is_err());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn catches_proc_self_root_escape() {
+    use std::path::Path;
+
+    // /proc/self/root is a symlink to / on Linux
+    // This should be caught by symlink resolution
+    if !Path::new("/proc/self/root").exists() {
+        return; // Skip if not available (containers, etc.)
+    }
+
+    let jail = Jail::new("/proc").unwrap();
+    let result = jail.join("self/root/etc/passwd");
+
+    // Should be caught as symlink escape
+    assert!(result.is_err());
+}
+
+#[test]
+fn rejects_file_as_root() {
+    use path_jail::JailError;
+
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("not_a_dir.txt");
+    fs::write(&file_path, b"hello").unwrap();
+
+    // Cannot use a file as jail root
+    let err = Jail::new(&file_path).unwrap_err();
+    assert!(matches!(err, JailError::InvalidRoot(_)));
+    let msg = format!("{}", err);
+    assert!(msg.contains("not a directory"));
+}
+
 // Test the convenience function
 #[test]
 fn join_function_works() {
@@ -288,4 +384,161 @@ fn relative_rejects_nonexistent_absolute() {
     // Non-existent absolute paths should fail
     let abs = jail.join("does/not/exist.txt").unwrap();
     assert!(jail.relative(&abs).is_err());
+}
+
+// ============================================================================
+// Path input edge cases
+// ============================================================================
+
+#[test]
+#[cfg(unix)]
+fn handles_null_bytes() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Null bytes in paths are invalid on Unix (C string terminator)
+    // canonicalize() and most filesystem operations will fail
+    let result = jail.join("file\x00.txt");
+    // Should error (invalid path), not silently truncate
+    assert!(result.is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn backslash_is_valid_filename_on_unix() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // On Unix, backslash is NOT a path separator - it's a valid filename char
+    // This creates a file literally named "foo\bar", not "foo/bar"
+    let path = jail.join(r"foo\bar").unwrap();
+    assert!(path.ends_with(r"foo\bar"));
+
+    // It should NOT be interpreted as a subdirectory
+    assert!(!path.ends_with("bar"));
+}
+
+#[test]
+fn handles_control_characters() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Control characters are technically valid in filenames on Unix
+    // (except null and slash). This is a logging/display issue, not security.
+    #[cfg(unix)]
+    {
+        // These should work (though they're ugly)
+        let _ = jail.join("file\n.txt");  // Newline
+        let _ = jail.join("file\t.txt");  // Tab
+    }
+}
+
+#[test]
+fn handles_spaces() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Leading/trailing spaces are valid filenames
+    let path1 = jail.join(" file.txt").unwrap();
+    let path2 = jail.join("file.txt ").unwrap();
+    let path3 = jail.join("file.txt").unwrap();
+
+    // These are all different files
+    assert_ne!(path1, path3);
+    assert_ne!(path2, path3);
+    // Note: Windows silently strips trailing spaces - documented in README
+}
+
+#[test]
+fn handles_hidden_files() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Leading dot is valid (Unix hidden files)
+    let path = jail.join(".hidden").unwrap();
+    assert!(path.ends_with(".hidden"));
+
+    // .hidden should not be confused with . or ..
+    assert!(path.starts_with(jail.root()));
+}
+
+#[test]
+#[cfg(unix)]
+fn handles_unicode_attacks() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Right-to-left override: displays "exe.txt" but is actually "txt.exe"
+    // This is a display attack, not a path attack. path_jail passes it through.
+    let rtl = "\u{202E}txt.exe";
+    let path = jail.join(rtl).unwrap();
+    assert!(path.ends_with(rtl));
+
+    // BOM as filename prefix
+    let bom = "\u{FEFF}file.txt";
+    let path = jail.join(bom).unwrap();
+    assert!(path.ends_with(bom));
+
+    // These are valid filenames. The security issue is UI display, not path handling.
+}
+
+#[test]
+fn rejects_absolute_in_path_components() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Absolute paths should be rejected
+    assert!(jail.join("/etc/passwd").is_err());
+
+    #[cfg(windows)]
+    {
+        assert!(jail.join(r"C:\Windows").is_err());
+        assert!(jail.join(r"\\server\share").is_err());
+    }
+}
+
+// ============================================================================
+// Root input edge cases
+// ============================================================================
+
+#[test]
+fn empty_root_fails() {
+    // Empty string should fail
+    assert!(Jail::new("").is_err());
+}
+
+#[test]
+fn dot_as_root() {
+    // Current directory as jail - valid if CWD exists
+    let result = Jail::new(".");
+    // Should succeed (canonicalizes to absolute path)
+    assert!(result.is_ok());
+    // Root should be absolute, not "."
+    assert!(result.unwrap().root().is_absolute());
+}
+
+#[test]
+fn tilde_not_expanded() {
+    // Rust doesn't expand ~ - it's treated as literal filename
+    let result = Jail::new("~");
+    // Will fail unless there's a directory literally named "~"
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// contains() edge cases
+// ============================================================================
+
+#[test]
+fn contains_normalizes_paths() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("subdir")).unwrap();
+    fs::write(dir.path().join("subdir/file.txt"), b"test").unwrap();
+
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Non-canonical path should still work (gets canonicalized)
+    let non_canonical = format!("{}/subdir/../subdir/file.txt", dir.path().display());
+    let result = jail.contains(&non_canonical);
+    assert!(result.is_ok());
 }

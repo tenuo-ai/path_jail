@@ -9,15 +9,17 @@ pub struct Jail {
 
 impl Jail {
     /// Create a jail rooted at the given directory.
-    /// Canonicalizes the root immediately.
-    /// Errors if root does not exist or is not a directory.
+    ///
+    /// Canonicalizes the root immediately. Errors if:
+    /// - Root does not exist
+    /// - Root is not a directory
+    /// - Root is a filesystem root (`/`, `C:\`, `\\server\share`)
     pub fn new<P: AsRef<Path>>(root: P) -> Result<Self, JailError> {
         let root = root.as_ref().canonicalize()?;
-        if !root.is_dir() {
-            return Err(JailError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Root must be a directory",
-            )));
+        // Reject filesystem roots (/, C:\) - they have no parent
+        // Reject non-directories (files, etc.)
+        if root.parent().is_none() || !root.is_dir() {
+            return Err(JailError::InvalidRoot(root));
         }
         Ok(Self { root })
     }
@@ -34,6 +36,13 @@ impl Jail {
     #[must_use = "use the returned path, not the original input"]
     pub fn join<P: AsRef<Path>>(&self, relative: P) -> Result<PathBuf, JailError> {
         let path = relative.as_ref();
+
+        // Reject null bytes (C string terminator attack)
+        // These would be truncated by the OS, causing path confusion
+        if path.to_string_lossy().contains('\0') {
+            return Err(JailError::InvalidPath("null bytes not allowed".into()));
+        }
+
         if path.is_absolute() {
             return Err(JailError::InvalidPath("absolute paths not allowed".into()));
         }

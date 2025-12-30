@@ -66,10 +66,14 @@ let path2 = jail.join("data.csv")?;
 | Broken symlinks | `link -> /nonexistent` | Yes |
 | Absolute injection | `/etc/passwd` | Yes |
 | Parent escape | `foo/../../secret` | Yes |
+| Null byte injection | `file\x00.txt` | Yes |
 
 ### Limitations
 
 This library validates paths. It does not hold file descriptors.
+
+**Rejected at construction:**
+- Filesystem roots (`/`, `C:\`, `\\server\share`) are rejected because they defeat the purpose of jailing.
 
 **Defends against:**
 - Logic errors in path construction
@@ -89,6 +93,22 @@ Hard links cannot be detected by path inspection. If an attacker has shell acces
 **Mitigations:**
 - Use a separate partition for the jail (hard links cannot cross partitions)
 - Use container isolation
+
+#### Mount Points
+
+If an attacker can mount a filesystem inside the jail, they can escape:
+
+```rust
+let jail = Jail::new("/var/uploads")?;
+// Attacker (with root): mount /dev/sda1 /var/uploads/mnt
+jail.join("mnt/etc/passwd")?;  // Passes check, but accesses root filesystem!
+```
+
+Detecting mount points would require `stat()` on every path component (expensive) or parsing `/proc/mounts` (Linux-only).
+
+**Mitigations:**
+- Mounting requires root privileges. If attacker has root, path validation is moot.
+- Use container isolation (separate mount namespace)
 
 #### TOCTOU Race Conditions
 
@@ -119,16 +139,45 @@ std::fs::File::open(&path)?;         // Opens console device, not file!
 
 #### Unicode Normalization (macOS)
 
-macOS automatically converts filenames to NFD (decomposed) form. A file saved as `café.txt` (composed) may be stored as `café.txt` (decomposed).
+macOS automatically converts filenames to NFD (decomposed) form. A file saved as `café.txt` (NFC) may be stored as `café.txt` (NFD).
 
-**Impact:** Not a security issue, but may cause "file not found" if comparing filenames byte-for-byte.
+path_jail handles this correctly (all paths are canonicalized). The issue arises when storing paths externally:
+
+```rust
+let user_input = "café";  // NFC from web form
+let jail = Jail::new(format!("/uploads/{}", user_input))?;
+
+// Wrong: storing original input
+db.insert("root", user_input);  // NFC bytes
+
+// Later: comparison fails
+db.get("root") == jail.root().to_str();  // NFC != NFD
+```
+
+**Mitigation:** Always store `jail.root()` or `jail.relative()`, never the original input. These are already canonicalized.
 
 #### Case Sensitivity (Windows/macOS)
 
-Windows and macOS (by default) have case-insensitive filesystems:
+Windows and macOS (by default) have case-insensitive filesystems.
+
+path_jail handles this correctly for existing paths because `canonicalize()` normalizes case to what's on disk:
 
 ```rust
-jail.join("FILE.txt")?;  // Points to same file as "file.txt"
+let jail = Jail::new("/var/Uploads")?;           // Canonicalized
+jail.contains("/var/uploads/file.txt")?;          // Also canonicalized - works!
+```
+
+The issue is for blocklist checks on user input before calling path_jail:
+
+```rust
+let blocklist = ["secret.txt"];
+let input = "SECRET.TXT";
+
+// Wrong: case-sensitive comparison
+if blocklist.contains(&input) { /* won't match */ }
+
+// Right: normalize first
+if blocklist.contains(&input.to_lowercase().as_str()) { /* matches */ }
 ```
 
 **Mitigation:** Normalize case before blocklist checks.
@@ -148,9 +197,26 @@ jail.join("file.txt ")?;   // Becomes "file.txt"
 
 NTFS supports alternate data streams: `file.txt:hidden`. Consider rejecting filenames containing `:`.
 
+#### Unicode Display Attacks
+
+Filenames can contain Unicode control characters that manipulate display:
+
+```rust
+jail.join("\u{202E}txt.exe")?;  // Right-to-left override: displays as "exe.txt"
+```
+
+path_jail passes these through (they're valid filenames). This is a UI attack, not a path attack. Sanitize filenames before displaying to users.
+
 #### Special Filesystems (Linux)
 
-Avoid using path_jail with special filesystem roots like `/proc` or `/dev` (contain symlinks to sensitive locations).
+`/proc` and `/dev` contain symlinks that can escape any jail:
+
+```rust
+let jail = Jail::new("/proc")?;
+jail.join("self/root/etc/passwd")?;  // /proc/self/root → /
+```
+
+path_jail catches this via symlink resolution (the above returns `EscapedRoot`). However, these filesystems have many such escape vectors. Avoid using them as jail roots.
 
 ### Path Canonicalization
 
@@ -183,7 +249,7 @@ let safe: PathBuf = path_jail::join("/var/uploads", "subdir/file.txt")?;
 ```rust
 use path_jail::Jail;
 
-// Create a jail (root must exist and be a directory)
+// Create a jail (root must exist, be a directory, and not be filesystem root)
 let jail = Jail::new("/var/uploads")?;
 
 // Get the canonicalized root
@@ -200,6 +266,27 @@ let rel: PathBuf = jail.relative(&path)?;  // "subdir/file.txt"
 ```
 
 ## Error Handling
+
+### Construction errors
+
+```rust
+use path_jail::{Jail, JailError};
+
+match Jail::new("/var/uploads") {
+    Ok(jail) => { /* use jail */ }
+    Err(JailError::InvalidRoot(path)) => {
+        // Tried to use filesystem root (/, C:\) as jail
+        panic!("Config error: {} is filesystem root", path.display());
+    }
+    Err(JailError::Io(e)) => {
+        // Root doesn't exist or isn't a directory
+        panic!("Config error: {}", e);
+    }
+    Err(_) => unreachable!(),
+}
+```
+
+### Path validation errors
 
 ```rust
 use path_jail::{Jail, JailError};
@@ -227,6 +314,7 @@ match jail.join(user_input) {
         // Filesystem error (e.g., permission denied)
         eprintln!("I/O error: {}", e);
     }
+    Err(JailError::InvalidRoot(_)) => unreachable!(), // Only from Jail::new
 }
 ```
 
