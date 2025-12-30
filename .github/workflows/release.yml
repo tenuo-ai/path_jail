@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
 
+# Minimum permissions for security (principle of least privilege)
+permissions:
+  contents: read
+
 jobs:
   publish:
     name: Publish to crates.io
