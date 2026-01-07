@@ -542,3 +542,139 @@ fn contains_normalizes_paths() {
     let result = jail.contains(&non_canonical);
     assert!(result.is_ok());
 }
+
+// ============================================================================
+// JailedPath tests
+// ============================================================================
+
+#[test]
+fn join_typed_returns_jailed_path() {
+    use path_jail::JailedPath;
+
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    let path: JailedPath = jail.join_typed("file.txt").unwrap();
+
+    // Can use as Path
+    assert!(path.as_path().ends_with("file.txt"));
+    assert!(path.starts_with(jail.root())); // Deref to Path
+
+    // Display works
+    let display = format!("{}", path);
+    assert!(display.contains("file.txt"));
+
+    // into_inner works
+    let pathbuf = path.into_inner();
+    assert!(pathbuf.ends_with("file.txt"));
+}
+
+#[test]
+fn jailed_path_can_be_used_with_std_fs() {
+    use path_jail::JailedPath;
+
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    let path: JailedPath = jail.join_typed("test.txt").unwrap();
+
+    // Can pass directly to std::fs functions (via AsRef<Path>)
+    fs::write(&path, b"hello").unwrap();
+    let contents = fs::read_to_string(&path).unwrap();
+    assert_eq!(contents, "hello");
+}
+
+#[test]
+fn jailed_path_blocks_traversal() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Should still block traversal attempts
+    assert!(jail.join_typed("../secret").is_err());
+    assert!(jail.join_typed("foo/../../secret").is_err());
+}
+
+// ============================================================================
+// join_segments tests
+// ============================================================================
+
+#[test]
+fn join_segments_basic() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    let path = jail.join_segments(["users", "alice", "uploads"]).unwrap();
+    assert!(path.ends_with("users/alice/uploads"));
+    assert!(path.starts_with(jail.root()));
+}
+
+#[test]
+fn join_segments_rejects_path_separators() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Forward slash in segment
+    let err = jail.join_segments(["users/alice"]).unwrap_err();
+    assert!(format!("{}", err).contains("path separator"));
+
+    // Backslash in segment (even on Unix, we reject for consistency)
+    let err = jail.join_segments(["users\\alice"]).unwrap_err();
+    assert!(format!("{}", err).contains("path separator"));
+}
+
+#[test]
+fn join_segments_rejects_parent_traversal() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    let err = jail.join_segments(["users", "..", "secret"]).unwrap_err();
+    assert!(format!("{}", err).contains(".."));
+}
+
+#[test]
+fn join_segments_rejects_null_bytes() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    let err = jail.join_segments(["file\0name"]).unwrap_err();
+    assert!(format!("{}", err).contains("null"));
+}
+
+#[test]
+fn join_segments_allows_dots() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Single dot as segment (current dir) - allowed, just ignored
+    let path = jail.join_segments([".", "file.txt"]).unwrap();
+    assert!(path.ends_with("file.txt"));
+
+    // Dotfiles are fine
+    let path = jail.join_segments([".hidden"]).unwrap();
+    assert!(path.ends_with(".hidden"));
+
+    // Extensions are fine
+    let path = jail.join_segments(["file.tar.gz"]).unwrap();
+    assert!(path.ends_with("file.tar.gz"));
+}
+
+#[test]
+fn join_segments_skips_empty() {
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    // Empty segments are skipped
+    let path = jail.join_segments(["users", "", "alice"]).unwrap();
+    assert!(path.ends_with("users/alice"));
+}
+
+#[test]
+fn segments_returns_jailed_path() {
+    use path_jail::JailedPath;
+
+    let dir = tempdir().unwrap();
+    let jail = Jail::new(dir.path()).unwrap();
+
+    let path: JailedPath = jail.segments(["users", "bob", "photo.jpg"]).unwrap();
+    assert!(path.ends_with("users/bob/photo.jpg"));
+}

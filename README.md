@@ -51,9 +51,11 @@ let path2 = jail.join("data.csv")?;
 
 ## Features
 
-- **Zero dependencies** - only stdlib
+- **Zero dependencies** - only stdlib (optional `secure-open` feature for TOCTOU protection)
 - **Symlink-safe** - resolves and validates symlinks
 - **Works for new files** - validates paths that don't exist yet
+- **Type-safe paths** - optional `JailedPath` newtype prevents confused deputy bugs
+- **Segment joining** - safely build paths from user IDs, filenames, etc.
 - **Helpful errors** - tells you what went wrong and why
 
 ## Security
@@ -121,7 +123,7 @@ std::fs::write(&path, data)?;        // Escapes!
 ```
 
 **Mitigations:**
-- Use `O_NOFOLLOW` when opening files
+- Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (see below)
 - Use container/chroot isolation
 
 #### Windows Reserved Device Names
@@ -265,6 +267,45 @@ let verified: PathBuf = jail.contains("/var/uploads/file.txt")?;
 let rel: PathBuf = jail.relative(&path)?;  // "subdir/file.txt"
 ```
 
+### Type-safe paths
+
+Use `JailedPath` for compile-time guarantees:
+
+```rust
+use path_jail::{Jail, JailedPath};
+
+fn save_upload(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
+    // path is guaranteed to be inside the jail - no runtime check needed
+    std::fs::write(&path, data)
+}
+
+let jail = Jail::new("/var/uploads")?;
+let path: JailedPath = jail.join_typed("report.pdf")?;
+save_upload(path, b"data")?;
+```
+
+### Segment joining
+
+Safely build paths from multiple user inputs:
+
+```rust
+use path_jail::Jail;
+
+let jail = Jail::new("/var/uploads")?;
+let user_id = "alice";
+let filename = "photo.jpg";
+
+// Safe: each segment is validated (no /, \, or .. allowed in segments)
+let path = jail.join_segments([user_id, "files", filename])?;
+
+// These would fail:
+// jail.join_segments(["../etc", "passwd"])?;     // ".." rejected
+// jail.join_segments(["users/files"])?;          // "/" in segment rejected
+
+// Type-safe version:
+let path: JailedPath = jail.segments([user_id, "files", filename])?;
+```
+
 ## Error Handling
 
 ### Construction errors
@@ -398,51 +439,53 @@ async fn upload(
 }
 ```
 
-## Want Type-Safe Paths?
+## TOCTOU-Safe File Operations (Unix)
 
-If you want to enforce validated paths at compile time, use the newtype pattern:
+Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations:
 
-```rust
-use path_jail::{Jail, JailError};
-use std::path::{Path, PathBuf};
-
-/// A path verified to be inside a jail.
-pub struct JailedPath(PathBuf);
-
-impl JailedPath {
-    pub fn new(jail: &Jail, path: impl AsRef<Path>) -> Result<Self, JailError> {
-        jail.join(path).map(Self)
-    }
-
-    pub fn as_path(&self) -> &Path {
-        &self.0
-    }
-}
-
-// Now your functions can require JailedPath
-fn save_upload(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path.as_path(), data)
-}
+```toml
+[dependencies]
+path_jail = { version = "0.3", features = ["secure-open"] }
 ```
 
-This makes "confused deputy" bugs a compile error: you cannot accidentally pass an unvalidated `PathBuf` where a `JailedPath` is expected.
+```rust
+use path_jail::Jail;
+use std::io::{Read, Write};
 
-This pattern has **zero runtime cost** - it's a newtype wrapper that compiles away.
+let jail = Jail::new("/var/uploads")?;
+
+// Open with O_NOFOLLOW - fails if path is a symlink
+let mut file = jail.open("config.txt")?;
+let mut contents = String::new();
+file.read_to_string(&mut contents)?;
+
+// Create with O_CREAT | O_EXCL | O_NOFOLLOW - fails if file exists or is symlink
+let mut file = jail.create("new.txt")?;
+file.write_all(b"hello")?;
+
+// Other options
+let file = jail.create_or_truncate("data.txt")?;  // Truncate if exists
+let file = jail.open_append("log.txt")?;           // Append mode
+```
+
+This protects against symlink swap attacks between validation and file open. Zero additional dependencies.
+
+**Limitation:** Protects the final path component only. For full TOCTOU protection against intermediate directory attacks, use `cap-std`.
 
 ## Alternatives
 
 | | path_jail | strict-path | cap-std |
 |-|-----------|-------------|---------|
 | Approach | Path validation | Type-safe path system | File descriptors |
-| Returns | `std::path::PathBuf` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
+| Returns | `PathBuf` / `JailedPath` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
 | Dependencies | 0 | ~5 | ~10 |
-| TOCTOU-safe | Path-only* | No | Yes |
+| TOCTOU-safe | With `secure-open`* | No | Yes |
 | Best for | Simple file sandboxing | Complex type-safe paths | Kernel-enforced security |
 
 - [`strict-path`](https://crates.io/crates/strict-path) - More comprehensive, uses marker types for compile-time guarantees
 - [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but different API than `std::fs`
 
-*Path-only: Safe against remote attackers (who can't race the filesystem). Not safe against local attackers with write access to the jail directory. See [TOCTOU Race Conditions](#toctou-race-conditions).
+*With `secure-open`: Safe against remote attackers and symlink attacks on the final path component. Not safe against local attackers who can swap intermediate directories. See [TOCTOU Race Conditions](#toctou-race-conditions).
 
 ## Thread Safety
 

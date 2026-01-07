@@ -84,11 +84,19 @@ pub struct Jail {
     root: PathBuf,  // Always canonicalized
 }
 
+/// A path verified to be inside a Jail.
+/// Zero-cost wrapper providing compile-time guarantees.
+#[derive(Debug, Clone)]
+pub struct JailedPath {
+    inner: PathBuf,
+}
+
 #[derive(Debug)]
 pub enum JailError {
     EscapedRoot { attempted: PathBuf, root: PathBuf },
     BrokenSymlink(PathBuf),
     InvalidPath(String),
+    InvalidRoot(PathBuf),
     Io(std::io::Error),
 }
 ```
@@ -100,6 +108,9 @@ pub enum JailError {
 | `Jail::new(root)` | Directory path | `Result<Jail, JailError>` | Root must exist |
 | `Jail::root()` | - | `&Path` | Canonicalized root |
 | `Jail::join(relative)` | Relative path | `Result<PathBuf, JailError>` | Works for non-existent files |
+| `Jail::join_typed(relative)` | Relative path | `Result<JailedPath, JailError>` | Type-safe version |
+| `Jail::join_segments(iter)` | Iterator of segments | `Result<PathBuf, JailError>` | Validates each segment |
+| `Jail::segments(iter)` | Iterator of segments | `Result<JailedPath, JailError>` | Type-safe version |
 | `Jail::contains(absolute)` | Absolute path | `Result<PathBuf, JailError>` | Path must exist |
 | `Jail::relative(path)` | Absolute or relative | `Result<PathBuf, JailError>` | Strips root prefix |
 | `path_jail::join(root, path)` | Root + relative | `Result<PathBuf, JailError>` | One-shot convenience |
@@ -130,7 +141,7 @@ Ensures `starts_with()` comparisons work correctly. Without canonicalization:
 - `/var/uploads` vs `/var/./uploads` would fail
 - macOS: `/var` vs `/private/var` would fail
 
-**Why no I/O helpers?**
+**Why no I/O helpers by default?**
 
 Keeps the crate focused on path validation. Users can compose with `std::fs`:
 
@@ -141,28 +152,75 @@ std::fs::write(&path, data)?;
 
 This is more flexible and doesn't hide what's happening.
 
+**Why `JailedPath`?**
+
+Prevents "confused deputy" bugs at compile time. Functions can require `JailedPath` parameters, making it impossible to accidentally pass an unvalidated path:
+
+```rust
+fn save_upload(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(&path, data)  // Guaranteed to be inside the jail
+}
+
+// Won't compile: PathBuf is not JailedPath
+save_upload(user_input, data);  // Error!
+
+// Must validate first
+let safe = jail.join_typed(user_input)?;
+save_upload(safe, data);  // OK
+```
+
+**Why `join_segments()`?**
+
+Common pattern is building paths from multiple user inputs: `format!("{}/{}", user_id, filename)`. This is error-prone:
+- Path separators in segments can cause unexpected behavior
+- `..` in segments can still escape
+
+`join_segments()` validates each segment independently, rejecting `/`, `\`, and `..`.
+
 ## 4. Project Structure
 
 ```
 path_jail/
 ├── src/
-│   ├── lib.rs      # Re-exports, join() convenience function
-│   ├── jail.rs     # Jail struct and methods
-│   └── error.rs    # JailError enum
+│   ├── lib.rs         # Re-exports, join() convenience function
+│   ├── jail.rs        # Jail struct and methods
+│   ├── jailed_path.rs # JailedPath newtype
+│   ├── error.rs       # JailError enum
+│   └── open.rs        # secure-open feature (O_NOFOLLOW helpers)
 ├── tests/
-│   └── security.rs # Integration tests
-├── README.md       # User guide
-├── DESIGN.md       # This file
+│   ├── security.rs    # Integration tests
+│   └── secure_open.rs # secure-open feature tests
+├── README.md          # User guide
+├── DESIGN.md          # This file
 ├── LICENSE-MIT
 └── LICENSE-APACHE
 ```
 
-## 5. Future Considerations
+## 5. Feature Flags
+
+### `secure-open` (Unix only)
+
+Adds TOCTOU-safe file operations using `O_NOFOLLOW`:
+
+```rust
+// Opens with O_NOFOLLOW - rejects symlinks on the final path component
+let file = jail.open("config.txt")?;
+
+// Creates with O_CREAT | O_EXCL | O_NOFOLLOW
+let file = jail.create("new.txt")?;
+```
+
+This protects against symlink swap attacks between path validation and file open. Zero dependencies - uses `std::os::unix::fs::OpenOptionsExt::custom_flags()` with platform-specific `O_NOFOLLOW` constants.
+
+**Limitation:** Protects the final path component only. Intermediate directory symlink swaps require `openat()` walking, which would need `libc`. For full TOCTOU protection, use `cap-std`.
+
+## 6. Future Considerations
 
 Not planned, but possible extensions if there's demand:
 
 - **Async support**: Feature-gated async versions of I/O operations
 - **Serde support**: Deserialize `Jail` from config files
 - **Custom canonicalization**: For virtual filesystems or testing
+- **Windows `secure-open`**: Reparse point detection via `FILE_FLAG_OPEN_REPARSE_POINT`
 
 These would be feature-gated to maintain zero-dependency default.

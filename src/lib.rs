@@ -24,6 +24,24 @@
 //! # Ok::<(), path_jail::JailError>(())
 //! ```
 //!
+//! # Type-Safe Paths
+//!
+//! For compile-time guarantees, use [`JailedPath`]:
+//!
+//! ```no_run
+//! use path_jail::{Jail, JailedPath};
+//!
+//! fn save_upload(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
+//!     // path is guaranteed to be inside the jail
+//!     std::fs::write(&path, data)
+//! }
+//!
+//! let jail = Jail::new("/var/uploads")?;
+//! let path = jail.join_typed("report.pdf")?;
+//! save_upload(path, b"data")?;
+//! # Ok::<(), path_jail::JailError>(())
+//! ```
+//!
 //! # Security
 //!
 //! This crate blocks:
@@ -37,11 +55,19 @@
 
 mod error;
 mod jail;
+mod jailed_path;
+
+#[cfg(feature = "secure-open")]
+mod open;
 
 use std::path::{Path, PathBuf};
 
 pub use error::JailError;
 pub use jail::Jail;
+pub use jailed_path::JailedPath;
+
+#[cfg(feature = "secure-open")]
+pub use open::JailedFile;
 
 /// Validate a path in one shot.
 ///

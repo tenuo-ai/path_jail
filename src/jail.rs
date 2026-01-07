@@ -1,4 +1,5 @@
 use crate::error::JailError;
+use crate::jailed_path::JailedPath;
 use std::path::{Component, Path, PathBuf};
 
 /// A filesystem sandbox that restricts paths to a root directory.
@@ -155,6 +156,117 @@ impl Jail {
                 attempted: path.to_path_buf(),
                 root: self.root.clone(),
             })
+    }
+}
+
+impl Jail {
+    /// Like [`join`](Self::join), but returns a [`JailedPath`] for type-safe handling.
+    ///
+    /// Use this when you want compile-time guarantees that a path has been validated.
+    /// Functions can require `JailedPath` parameters to prevent confused deputy bugs.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use path_jail::{Jail, JailedPath};
+    ///
+    /// fn write_safe(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
+    ///     std::fs::write(&path, data)  // path is guaranteed valid
+    /// }
+    ///
+    /// let jail = Jail::new("/var/uploads")?;
+    /// let path = jail.join_typed("report.pdf")?;
+    /// write_safe(path, b"data")?;
+    /// # Ok::<(), path_jail::JailError>(())
+    /// ```
+    #[must_use = "use the returned JailedPath, not the original input"]
+    pub fn join_typed<P: AsRef<Path>>(&self, relative: P) -> Result<JailedPath, JailError> {
+        self.join(relative).map(JailedPath::new)
+    }
+
+    /// Join multiple path segments safely.
+    ///
+    /// Each segment must be a single path component (no `/`, `\`, `..`, or null bytes).
+    /// This is safer than `join(format!("{}/{}", a, b))` because it validates
+    /// each segment independently.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use path_jail::Jail;
+    ///
+    /// let jail = Jail::new("/var/uploads")?;
+    /// let user_id = "user123";
+    /// let filename = "report.pdf";
+    ///
+    /// // Safe: each segment is validated
+    /// let path = jail.join_segments([user_id, "files", filename])?;
+    ///
+    /// // These would fail:
+    /// // jail.join_segments(["../etc", "passwd"])?;     // ".." rejected
+    /// // jail.join_segments(["users/files"])?;          // "/" rejected
+    /// # Ok::<(), path_jail::JailError>(())
+    /// ```
+    #[must_use = "use the returned path, not the original input"]
+    pub fn join_segments<I, S>(&self, segments: I) -> Result<PathBuf, JailError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut path = PathBuf::new();
+        for seg in segments {
+            let seg = seg.as_ref();
+
+            // Reject empty segments
+            if seg.is_empty() {
+                continue;
+            }
+
+            // Reject path separators
+            if seg.contains('/') || seg.contains('\\') {
+                return Err(JailError::InvalidPath(format!(
+                    "segment '{}' contains path separator",
+                    seg
+                )));
+            }
+
+            // Reject parent traversal
+            if seg == ".." {
+                return Err(JailError::InvalidPath(
+                    "segment '..' not allowed".into(),
+                ));
+            }
+
+            // Reject null bytes
+            if seg.contains('\0') {
+                return Err(JailError::InvalidPath(
+                    "segment contains null byte".into(),
+                ));
+            }
+
+            path.push(seg);
+        }
+        self.join(path)
+    }
+
+    /// Like [`join_segments`](Self::join_segments), but returns a [`JailedPath`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use path_jail::{Jail, JailedPath};
+    ///
+    /// let jail = Jail::new("/var/uploads")?;
+    /// let path: JailedPath = jail.segments(["users", "alice", "photo.jpg"])?;
+    /// # Ok::<(), path_jail::JailError>(())
+    /// ```
+    #[must_use = "use the returned JailedPath, not the original input"]
+    pub fn segments<I, S>(&self, segments: I) -> Result<JailedPath, JailError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.join_segments(segments).map(JailedPath::new)
     }
 }
 

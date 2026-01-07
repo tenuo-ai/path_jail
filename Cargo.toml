@@ -1,6 +1,6 @@
 [package]
 name = "path_jail"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -9,6 +9,11 @@ repository = "https://github.com/tenuo-ai/path_jail"
 homepage = "https://tenuo.dev"
 keywords = ["security", "filesystem", "sandbox", "path", "traversal"]
 categories = ["filesystem", "security"]
+
+[features]
+default = []
+# TOCTOU-safe file operations using O_NOFOLLOW (Unix only, zero deps)
+secure-open = []
 
 [dependencies]
 # No runtime dependencies!
