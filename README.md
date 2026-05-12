@@ -60,7 +60,7 @@ let path2 = jail.join("data.csv")?;
 - **Segment joining** - safely build paths from user IDs, filenames, etc.
 - **Helpful errors** - tells you what went wrong and why
 - **`secure-open` feature** (Unix) - `O_NOFOLLOW`-protected opens; zero extra deps
-- **`fd-first` feature** (Linux 5.6+) - kernel-enforced TOCTOU safety via `openat2(RESOLVE_BENEATH)`; `O_NOFOLLOW` fallback on macOS/BSD
+- **`guard` feature** (Linux 5.6+) - kernel-enforced TOCTOU safety via `openat2(RESOLVE_BENEATH)`; `O_NOFOLLOW` fallback on macOS/BSD
 
 ## Security
 
@@ -86,9 +86,9 @@ This library validates paths. It does not hold file descriptors.
 - Confused deputy attacks from untrusted input
 
 **Does not defend against:**
-- Malicious local processes racing your I/O (use the `fd-first` feature for kernel-enforced protection on Linux 5.6+)
+- Malicious local processes racing your I/O (use the `guard` feature for kernel-enforced protection on Linux 5.6+)
 
-For kernel-enforced sandboxing without leaving the `path_jail` API, enable the [`fd-first` feature](#fd-first-kernel-enforced-toctou-safety-linux-56). For a
+For kernel-enforced sandboxing without leaving the `path_jail` API, enable the [`guard` feature](#fd-first-kernel-enforced-toctou-safety-linux-56). For a
 capability-based alternative that replaces `std::fs` entirely, see [`cap-std`](https://docs.rs/cap-std).
 
 ### Platform-Specific Edge Cases
@@ -128,7 +128,7 @@ std::fs::write(&path, data)?;        // Escapes!
 ```
 
 **Mitigations:**
-- Enable the `fd-first` feature on Linux 5.6+: a single `openat2(RESOLVE_BENEATH)` syscall makes the validate-and-open atomic (see [below](#fd-first-kernel-enforced-toctou-safety-linux-56))
+- Enable the `guard` feature on Linux 5.6+: a single `openat2(RESOLVE_BENEATH)` syscall makes the validate-and-open atomic (see [below](#fd-first-kernel-enforced-toctou-safety-linux-56))
 - Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (protects the final component only)
 - Use container/chroot isolation
 
@@ -482,17 +482,17 @@ This protects against symlink swap attacks on the **final path component**. Zero
 
 ---
 
-### `fd-first` — Kernel-enforced TOCTOU safety (Linux 5.6+)
+### `guard` — Kernel-enforced TOCTOU safety (Linux 5.6+)
 
-The `fd-first` feature uses a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall. Because the validate-and-open is **atomic at the kernel level**, there is no window for a race condition:
+The `guard` feature uses a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall. Because the validate-and-open is **atomic at the kernel level**, there is no window for a race condition:
 
 ```toml
 [dependencies]
-path_jail = { version = "0.4", features = ["fd-first"] }
+path_jail = { version = "0.4", features = ["guard"] }
 ```
 
 ```rust
-use path_jail::fd_first::{FdJail, OpenOptions};
+use path_jail::guard::{FdJail, OpenOptions};
 use std::io::Read;
 
 // Pin the jail root as a file descriptor — renames of the root after this
@@ -533,16 +533,16 @@ out.write_all(b"processed")?;
 
 | | path_jail | strict-path | cap-std |
 |-|-----------|-------------|---------|
-| Approach | Path validation + fd-first | Type-safe path system | File descriptors |
+| Approach | Path validation + guard | Type-safe path system | File descriptors |
 | Returns | `PathBuf` / `JailedPath` / `JailFile` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
 | Dependencies | 0 | ~5 | ~10 |
-| TOCTOU-safe | `fd-first` (Linux 5.6+, kernel-enforced) / `secure-open` (final component, all Unix) | No | Yes |
+| TOCTOU-safe | `guard` (Linux 5.6+, kernel-enforced) / `secure-open` (final component, all Unix) | No | Yes |
 | Best for | File sandboxing with optional kernel enforcement | Complex type-safe paths | Full capability-based security |
 
 - [`strict-path`](https://crates.io/crates/strict-path) - More comprehensive, uses marker types for compile-time guarantees
 - [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but replaces `std::fs` entirely
 
-*`fd-first` on Linux 5.6+: the validate-and-open is a single `openat2` syscall — truly atomic, no race window. On macOS/BSD the same API falls back to `O_NOFOLLOW` (final component only).*
+*`guard` on Linux 5.6+: the validate-and-open is a single `openat2` syscall — truly atomic, no race window. On macOS/BSD the same API falls back to `O_NOFOLLOW` (final component only).*
 
 ## Thread Safety
 

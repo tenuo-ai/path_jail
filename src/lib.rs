@@ -24,19 +24,19 @@
 //! # Ok::<(), path_jail::JailError>(())
 //! ```
 //!
-//! # TOCTOU-Safe File Operations (fd-first API)
+//! # TOCTOU-Safe File Operations (guard API)
 //!
-//! Enable the `fd-first` feature for kernel-enforced containment via
+//! Enable the `guard` feature for kernel-enforced containment via
 //! `openat2(RESOLVE_BENEATH)` on Linux 5.6+:
 //!
 //! ```toml
 //! [dependencies]
-//! path_jail = { version = "0.4", features = ["fd-first"] }
+//! path_jail = { version = "0.4", features = ["guard"] }
 //! ```
 //!
 //! ```no_run
-//! # #[cfg(feature = "fd-first")] {
-//! use path_jail::fd_first::{FdJail, OpenOptions};
+//! # #[cfg(feature = "guard")] {
+//! use path_jail::guard::{FdJail, OpenOptions};
 //!
 //! let jail = FdJail::new("/var/uploads")?;
 //! let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
@@ -77,10 +77,10 @@
 //! - Null byte injection (`file\x00.txt`)
 //! - Broken symlinks (cannot verify target)
 //!
-//! With `fd-first`: all of the above plus TOCTOU races, magic links
+//! With `guard`: all of the above plus TOCTOU races, magic links
 //! (`/proc/self/fd`), and intermediate directory attacks (Linux 5.6+).
 //!
-//! See [`Jail`] and [`fd_first::FdJail`] for details.
+//! See [`Jail`] and [`guard::FdJail`] for details.
 
 mod error;
 mod jail;
@@ -89,12 +89,12 @@ mod jailed_path;
 #[cfg(feature = "secure-open")]
 mod open;
 
-#[cfg(feature = "fd-first")]
+#[cfg(feature = "guard")]
 #[cfg(target_os = "linux")]
 pub(crate) mod openat2;
 
-#[cfg(feature = "fd-first")]
-pub mod fd_first;
+#[cfg(feature = "guard")]
+pub mod guard;
 
 use std::path::{Path, PathBuf};
 

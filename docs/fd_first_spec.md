@@ -1,8 +1,8 @@
-# path_jail fd-first rewrite: mini spec
+# path_jail guard rewrite: mini spec
 
 ## Objective
 
-Replace path_jail's validate-then-return-PathBuf architecture with an fd-first design using `openat2(RESOLVE_BENEATH)`. The result is TOCTOU-safe by construction. Zero new dependencies. Linux 5.6+ required; macOS gets a documented fallback with weaker guarantees.
+Replace path_jail's validate-then-return-PathBuf architecture with an guard design using `openat2(RESOLVE_BENEATH)`. The result is TOCTOU-safe by construction. Zero new dependencies. Linux 5.6+ required; macOS gets a documented fallback with weaker guarantees.
 
 ---
 

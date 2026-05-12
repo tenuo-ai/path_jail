@@ -7,11 +7,11 @@
 //!
 //! # Feature flag
 //!
-//! Enable the `fd-first` feature to opt into this API:
+//! Enable the `guard` feature to opt into this API:
 //!
 //! ```toml
 //! [dependencies]
-//! path_jail = { version = "0.4", features = ["fd-first"] }
+//! path_jail = { version = "0.4", features = ["guard"] }
 //! ```
 
 use crate::error::JailError;
@@ -27,7 +27,7 @@ use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MI
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// A file opened through [`FdJail::open`] or [`FdJail::create`] (fd-first API).
+/// A file opened through [`FdJail::open`] or [`FdJail::create`] (guard API).
 ///
 /// Holds both the open file descriptor and attestation data recorded at open
 /// time. On Linux 5.6+ the open is performed by a single `openat2` syscall and
@@ -62,7 +62,7 @@ impl JailFile {
     /// reading or writing:
     ///
     /// ```no_run
-    /// # use path_jail::fd_first::{FdJail, OpenOptions};
+    /// # use path_jail::guard::{FdJail, OpenOptions};
     /// # let jail = FdJail::new("/var/uploads").unwrap();
     /// let jf = jail.open("report.pdf", OpenOptions::new().read(true)).unwrap();
     /// if jf.has_hard_links() {
@@ -222,7 +222,7 @@ fn encode_path_field(buf: &mut Vec<u8>, path: &Path) {
 
 // ── OpenOptions ───────────────────────────────────────────────────────────────
 
-/// Options for opening a file through the fd-first API.
+/// Options for opening a file through the guard API.
 ///
 /// Mirrors the relevant subset of [`std::fs::OpenOptions`].
 ///

@@ -1,11 +1,11 @@
-//! Integration tests for the fd-first API (acceptance criteria from the spec).
+//! Integration tests for the guard API (acceptance criteria from the spec).
 //!
 //! These tests correspond 1:1 to the spec's acceptance criteria table.
 //! Run with: `cargo test --features fd-first`
 
-#![cfg(feature = "fd-first")]
+#![cfg(feature = "guard")]
 
-use path_jail::fd_first::{FdJail, OpenOptions};
+use path_jail::guard::{FdJail, OpenOptions};
 use path_jail::JailError;
 use std::io::{Read, Write};
 use tempfile::tempdir;

@@ -20,9 +20,9 @@ exclude = [
 default = []
 # TOCTOU-safe file operations using O_NOFOLLOW (Unix only, zero deps)
 secure-open = []
-# fd-first API: TOCTOU-safe openat2(RESOLVE_BENEATH) on Linux 5.6+,
+# guard API: TOCTOU-safe openat2(RESOLVE_BENEATH) on Linux 5.6+,
 # O_NOFOLLOW fallback on macOS/BSD. Zero new dependencies.
-fd-first = []
+guard = []
 
 [dependencies]
 # No runtime dependencies!

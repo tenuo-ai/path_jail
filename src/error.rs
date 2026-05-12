@@ -16,23 +16,23 @@ pub enum JailError {
     /// Jail root is invalid (path-based API).
     InvalidRoot(PathBuf),
 
-    // ── fd-first API variants ─────────────────────────────────────────────────
+    // ── guard API variants ─────────────────────────────────────────────────
     /// `openat2` returned `EXDEV` — path escapes jail or traverses above root.
     ///
     /// Covers symlink escapes, `..` traversal, and absolute path injection.
     /// This is the primary security error; one audit log entry covers the entire
     /// class of containment failures.
-    #[cfg(feature = "fd-first")]
+    #[cfg(feature = "guard")]
     Escape { requested: PathBuf },
 
     /// `openat2` returned `ELOOP` — symlink loop, or `RESOLVE_NO_SYMLINKS` was
-    /// set via [`OpenOptions::no_symlinks`](crate::fd_first::OpenOptions::no_symlinks).
-    #[cfg(feature = "fd-first")]
+    /// set via [`OpenOptions::no_symlinks`](crate::guard::OpenOptions::no_symlinks).
+    #[cfg(feature = "guard")]
     SymlinkRejected { requested: PathBuf },
 
     /// A `/proc/self/fd`-style magic link was detected (`RESOLVE_NO_MAGICLINKS`).
     /// These links can escape the jail regardless of `RESOLVE_BENEATH`.
-    #[cfg(feature = "fd-first")]
+    #[cfg(feature = "guard")]
     MagicLink { requested: PathBuf },
 
     /// `openat2(2)` is not available on this kernel (Linux < 5.6).
@@ -41,13 +41,13 @@ pub enum JailError {
     /// `/proc/sys/kernel/osrelease`, and `None` when `/proc` is unavailable
     /// (some hardened containers). In both cases the live `openat2` probe
     /// confirmed the syscall is not supported.
-    #[cfg(all(feature = "fd-first", target_os = "linux"))]
+    #[cfg(all(feature = "guard", target_os = "linux"))]
     UnsupportedKernel {
         version: Option<crate::openat2::KernelVersion>,
     },
 
-    /// Invalid root in the fd-first API (not a directory, filesystem root, or inaccessible).
-    #[cfg(feature = "fd-first")]
+    /// Invalid root in the guard API (not a directory, filesystem root, or inaccessible).
+    #[cfg(feature = "guard")]
     InvalidJailRoot {
         path: PathBuf,
         source: std::io::Error,
@@ -86,35 +86,35 @@ impl fmt::Display for JailError {
             }
 
             // fd-first variants
-            #[cfg(feature = "fd-first")]
+            #[cfg(feature = "guard")]
             Self::Escape { requested } => write!(
                 f,
                 "path '{}' escapes jail (openat2 EXDEV)",
                 requested.display()
             ),
-            #[cfg(feature = "fd-first")]
+            #[cfg(feature = "guard")]
             Self::SymlinkRejected { requested } => write!(
                 f,
                 "symlink rejected for path '{}' (ELOOP / no_symlinks policy)",
                 requested.display()
             ),
-            #[cfg(feature = "fd-first")]
+            #[cfg(feature = "guard")]
             Self::MagicLink { requested } => write!(
                 f,
                 "magic link detected for path '{}' (RESOLVE_NO_MAGICLINKS)",
                 requested.display()
             ),
-            #[cfg(all(feature = "fd-first", target_os = "linux"))]
+            #[cfg(all(feature = "guard", target_os = "linux"))]
             Self::UnsupportedKernel { version: Some(v) } => {
                 write!(f, "openat2 not available on kernel {} (requires >= 5.6)", v)
             }
-            #[cfg(all(feature = "fd-first", target_os = "linux"))]
+            #[cfg(all(feature = "guard", target_os = "linux"))]
             Self::UnsupportedKernel { version: None } => write!(
                 f,
                 "openat2 not available on this kernel (requires >= 5.6; \
                  kernel version unreadable)"
             ),
-            #[cfg(feature = "fd-first")]
+            #[cfg(feature = "guard")]
             Self::InvalidJailRoot { path, source } => {
                 write!(f, "invalid jail root '{}': {}", path.display(), source)
             }
@@ -128,7 +128,7 @@ impl std::error::Error for JailError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
-            #[cfg(feature = "fd-first")]
+            #[cfg(feature = "guard")]
             Self::InvalidJailRoot { source, .. } => Some(source),
             _ => None,
         }

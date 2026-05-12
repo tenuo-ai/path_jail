@@ -1,6 +1,6 @@
-//! fd-first API for TOCTOU-safe file access via `openat2(RESOLVE_BENEATH)`.
+//! guard API for TOCTOU-safe file access via `openat2(RESOLVE_BENEATH)`.
 //!
-//! This module is only available with the `fd-first` feature enabled.
+//! This module is only available with the `guard` feature enabled.
 //!
 //! See the [crate-level documentation](crate) for a quick-start example.
 
