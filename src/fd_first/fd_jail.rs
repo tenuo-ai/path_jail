@@ -567,18 +567,15 @@ impl FdJail {
             // Check kernel version first for a friendly error message.
             if let Some(kv) = crate::openat2::kernel_version() {
                 if kv < MIN_OPENAT2_KERNEL {
-                    return Err(JailError::UnsupportedKernel { version: kv });
+                    return Err(JailError::UnsupportedKernel { version: Some(kv) });
                 }
             }
             // Probe via actual syscall — authoritative even in containers that
             // hide the kernel version.
-            crate::openat2::probe_openat2().map_err(|_| {
-                let version = crate::openat2::kernel_version().unwrap_or(KernelVersion {
-                    major: 0,
-                    minor: 0,
-                    patch: 0,
-                });
-                JailError::UnsupportedKernel { version }
+            crate::openat2::probe_openat2().map_err(|_| JailError::UnsupportedKernel {
+                // kernel_version() is cached; if /proc was unavailable above it
+                // is still None here — which is valid for Option<KernelVersion>.
+                version: crate::openat2::kernel_version(),
             })?;
 
             // Open the jail root directory with O_DIRECTORY so the fd is a

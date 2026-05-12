@@ -37,10 +37,13 @@ pub enum JailError {
 
     /// `openat2(2)` is not available on this kernel (Linux < 5.6).
     ///
-    /// Upgrade the kernel or use the path-based API (which is not TOCTOU-safe).
+    /// `version` is `Some` when the kernel version was readable from
+    /// `/proc/sys/kernel/osrelease`, and `None` when `/proc` is unavailable
+    /// (some hardened containers). In both cases the live `openat2` probe
+    /// confirmed the syscall is not supported.
     #[cfg(all(feature = "fd-first", target_os = "linux"))]
     UnsupportedKernel {
-        version: crate::openat2::KernelVersion,
+        version: Option<crate::openat2::KernelVersion>,
     },
 
     /// Invalid root in the fd-first API (not a directory, filesystem root, or inaccessible).
@@ -102,10 +105,14 @@ impl fmt::Display for JailError {
                 requested.display()
             ),
             #[cfg(all(feature = "fd-first", target_os = "linux"))]
-            Self::UnsupportedKernel { version } => write!(
+            Self::UnsupportedKernel { version: Some(v) } => {
+                write!(f, "openat2 not available on kernel {} (requires >= 5.6)", v)
+            }
+            #[cfg(all(feature = "fd-first", target_os = "linux"))]
+            Self::UnsupportedKernel { version: None } => write!(
                 f,
-                "openat2 not available on kernel {} (requires >= 5.6)",
-                version
+                "openat2 not available on this kernel (requires >= 5.6; \
+                 kernel version unreadable)"
             ),
             #[cfg(feature = "fd-first")]
             Self::InvalidJailRoot { path, source } => {

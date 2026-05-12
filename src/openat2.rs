@@ -7,6 +7,23 @@
 
 use std::ffi::CStr;
 use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
+use std::sync::OnceLock;
+
+// ── Architecture guard ────────────────────────────────────────────────────────
+
+// The inline-asm syscall shim is currently implemented for x86_64 only.
+// aarch64 and riscv64 use different register conventions (x8/x0-x5 and
+// a7/a0-a5 respectively) and need their own asm blocks. Narrow the supported
+// arch list to x86_64 until those are written, rather than silently producing
+// broken binaries on aarch64 CI runners.
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!(
+    "path_jail fd-first: only x86_64 Linux is currently supported for the raw-asm syscall path. \
+     aarch64/riscv64 support is planned. Track: https://github.com/tenuo-ai/path_jail/issues"
+);
+
+// SYS_openat2 — syscall number on x86_64 Linux (added in 5.6)
+const SYS_OPENAT2: i64 = 437;
 
 // ── open_how layout (linux/openat2.h) ────────────────────────────────────────
 
@@ -22,9 +39,10 @@ pub(crate) const RESOLVE_BENEATH: u64 = 0x08;
 pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 
-// O_* flags
+// O_* flags (x86_64 Linux)
 pub(crate) const O_RDONLY: u64 = 0;
 pub(crate) const O_WRONLY: u64 = 1;
+#[allow(dead_code)]
 pub(crate) const O_RDWR: u64 = 2;
 pub(crate) const O_CREAT: u64 = 0o100;
 pub(crate) const O_EXCL: u64 = 0o200;
@@ -33,33 +51,12 @@ pub(crate) const O_APPEND: u64 = 0o2000;
 pub(crate) const O_DIRECTORY: u64 = 0o200000;
 pub(crate) const O_CLOEXEC: u64 = 0o2000000;
 
-// SYS_openat2 — added in Linux 5.6 (kernel 5.6+)
-// x86-64: 437, aarch64: 437, arm: 437 (all use the same number on 64-bit ABIs)
-#[cfg(any(
-    target_arch = "x86_64",
-    target_arch = "aarch64",
-    target_arch = "riscv64"
-))]
-const SYS_OPENAT2: i64 = 437;
-
-// 32-bit ABIs have different numbers but we only support 64-bit for now;
-// the MSRV guard below makes this explicit.
-#[cfg(not(any(
-    target_arch = "x86-64",
-    target_arch = "aarch64",
-    target_arch = "riscv64"
-)))]
-compile_error!("fd-first feature only supports x86-64, aarch64, and riscv64 Linux targets");
-
 // ── Errno ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Errno(pub i32);
 
 impl Errno {
-    pub fn from_raw(raw: i32) -> Self {
-        Self(raw)
-    }
     pub fn raw(self) -> i32 {
         self.0
     }
@@ -67,7 +64,6 @@ impl Errno {
     // Errno constants we care about
     pub const EXDEV: Errno = Errno(18); // Cross-device link / escape attempt
     pub const ELOOP: Errno = Errno(40); // Too many symlinks / RESOLVE_NO_SYMLINKS
-    pub const ENOENT: Errno = Errno(2); // No such file or directory
     pub const ENOSYS: Errno = Errno(38); // Syscall not supported (kernel < 5.6)
 }
 
@@ -91,12 +87,12 @@ impl From<Errno> for std::io::Error {
 /// The errno value is the raw negative return value of the syscall.
 pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedFd, Errno> {
     let fd = unsafe {
-        libc_syscall(
+        syscall4(
             SYS_OPENAT2,
-            dirfd,
-            path.as_ptr(),
-            how as *const OpenHow,
-            std::mem::size_of::<OpenHow>(),
+            dirfd as i64,
+            path.as_ptr() as i64,
+            how as *const OpenHow as i64,
+            std::mem::size_of::<OpenHow>() as i64,
         )
     };
     if fd < 0 {
@@ -110,67 +106,35 @@ pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedF
     }
 }
 
-/// Raw syscall(3) shim — avoids a libc dependency.
+/// Raw 4-argument syscall shim for x86_64 Linux — avoids a libc dependency.
 ///
-/// SAFETY: caller must supply correct syscall number and argument types.
+/// # Safety
+///
+/// Caller must supply the correct syscall number and argument types.
+/// Undefined behaviour if arguments do not match the kernel ABI for `nr`.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn libc_syscall(
-    nr: i64,
-    a0: impl Into<i64>,
-    a1: impl IntoRawArg,
-    a2: impl IntoRawArg,
-    a3: impl Into<i64>,
-) -> i64 {
-    let r0: i64;
+unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let ret: i64;
+    // x86_64 Linux syscall ABI:
+    //   nr  → rax (inlateout so the return value lands back in rax)
+    //   a0  → rdi
+    //   a1  → rsi
+    //   a2  → rdx
+    //   a3  → r10  (NOT rcx — the kernel uses rcx internally for SYSCALL)
+    // rcx and r11 are clobbered by SYSCALL.
     std::arch::asm!(
         "syscall",
-        inlateout("rax") nr => r0,
-        in("rdi") a0.into(),
-        in("rsi") a1.into_raw(),
-        in("rdx") a2.into_raw(),
-        in("r10") a3.into(),
+        inlateout("rax") nr => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
         out("rcx") _,
         out("r11") _,
         options(nostack),
     );
-    r0
-}
-
-// Helper trait to coerce pointer/integer arguments into i64 for the asm block
-pub(crate) trait IntoRawArg {
-    fn into_raw(self) -> i64;
-}
-impl IntoRawArg for i32 {
-    fn into_raw(self) -> i64 {
-        self as i64
-    }
-}
-impl IntoRawArg for i64 {
-    fn into_raw(self) -> i64 {
-        self
-    }
-}
-impl IntoRawArg for usize {
-    fn into_raw(self) -> i64 {
-        self as i64
-    }
-}
-impl<T> IntoRawArg for *const T {
-    fn into_raw(self) -> i64 {
-        self as i64
-    }
-}
-impl<T> IntoRawArg for *mut T {
-    fn into_raw(self) -> i64 {
-        self as i64
-    }
-}
-
-// Implement Into<i64> for RawFd (= i32) already works, but we need the pointer trait too.
-impl IntoRawArg for RawFd {
-    fn into_raw(self) -> i64 {
-        self as i64
-    }
+    ret
 }
 
 // ── Kernel version probe ───────────────────────────────────────────────────────
@@ -189,18 +153,30 @@ impl std::fmt::Display for KernelVersion {
     }
 }
 
-/// Returns the running kernel version by reading `/proc/sys/kernel/osrelease`.
-/// Falls back to `uname(2)` is unavailable (containers, etc.).
+/// Minimum kernel version that supports `openat2(2)`.
+pub(crate) const MIN_OPENAT2_KERNEL: KernelVersion = KernelVersion {
+    major: 5,
+    minor: 6,
+    patch: 0,
+};
+
+/// Returns the running kernel version, cached after the first call.
+///
+/// Reads `/proc/sys/kernel/osrelease` on the first call and caches the result
+/// in a `OnceLock`. Returns `None` if the file is unreadable (some containers
+/// restrict `/proc` access).
 pub(crate) fn kernel_version() -> Option<KernelVersion> {
-    // Try /proc first (most reliable in containers)
-    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
-        return parse_kernel_version(s.trim());
-    }
-    None
+    static CACHED: OnceLock<Option<KernelVersion>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .and_then(|s| parse_kernel_version(s.trim()))
+    })
 }
 
 fn parse_kernel_version(s: &str) -> Option<KernelVersion> {
-    // Format: "5.15.0-1045-aws" — take up to first '-' or whitespace
+    // Format: "5.15.0-1045-aws" — strip everything from the first '-' or space.
+    // This correctly handles distro suffixes like -aws, -generic, -microsoft-standard.
     let s = s.split(['-', ' ']).next()?;
     let mut parts = s.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -213,31 +189,29 @@ fn parse_kernel_version(s: &str) -> Option<KernelVersion> {
     })
 }
 
-/// Minimum kernel version that supports `openat2(2)`.
-pub(crate) const MIN_OPENAT2_KERNEL: KernelVersion = KernelVersion {
-    major: 5,
-    minor: 6,
-    patch: 0,
-};
-
-/// Probes whether `openat2` is available by calling it once with a dummy fd.
-/// Returns `Ok(())` if available, `Err(Errno::ENOSYS)` if not.
+/// Probes whether `openat2` is available via a single live syscall, cached.
+///
+/// Uses `AT_FDCWD` (-100) with an empty path and `RESOLVE_BENEATH`.
+/// - Kernel < 5.6 → `ENOSYS` → `Err(Errno::ENOSYS)`
+/// - Kernel ≥ 5.6 → `ENOENT` or `EINVAL` (empty path) → `Ok(())`
+///
+/// The result is cached in a `OnceLock` so repeated calls to `FdJail::new`
+/// in tight loops do not re-probe the kernel every time.
 pub(crate) fn probe_openat2() -> Result<(), Errno> {
-    use std::os::unix::io::AsRawFd;
-    // Use AT_FDCWD (-100) with an empty path and RESOLVE_BENEATH.
-    // Kernel < 5.6 returns ENOSYS. Kernel ≥ 5.6 returns ENOENT (empty path)
-    // or EINVAL — both mean "syscall exists".
-    let how = OpenHow {
-        flags: O_RDONLY | O_CLOEXEC,
-        mode: 0,
-        resolve: RESOLVE_BENEATH,
-    };
-    let empty = c"";
-    match openat2(-100i32 as RawFd, empty, &how) {
-        Ok(_) => Ok(()),
-        Err(e) if e == Errno::ENOSYS => Err(e),
-        Err(_) => Ok(()), // Any other error means syscall exists
-    }
+    static CACHED: OnceLock<Result<(), Errno>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let how = OpenHow {
+            flags: O_RDONLY | O_CLOEXEC,
+            mode: 0,
+            resolve: RESOLVE_BENEATH,
+        };
+        let empty = c"";
+        match openat2(-100i32 as RawFd, empty, &how) {
+            Ok(_) => Ok(()),
+            Err(e) if e == Errno::ENOSYS => Err(e),
+            Err(_) => Ok(()), // Any other error means the syscall exists
+        }
+    })
 }
 
 #[cfg(test)]
@@ -275,6 +249,17 @@ mod tests {
                 patch: 0
             }
         );
+
+        // microsoft-standard suffix (WSL2)
+        let v = parse_kernel_version("5.15.153.1-microsoft-standard-WSL2").unwrap();
+        assert_eq!(
+            v,
+            KernelVersion {
+                major: 5,
+                minor: 15,
+                patch: 153
+            }
+        );
     }
 
     #[test]
@@ -297,5 +282,22 @@ mod tests {
         assert!(v56 < v515);
         assert!(v515 < v6);
         assert!(v56 >= MIN_OPENAT2_KERNEL);
+    }
+
+    #[test]
+    fn probe_is_cached() {
+        // Calling probe twice should not do two syscalls (OnceLock ensures this).
+        // We can't directly observe the call count without mocking, but we can
+        // verify the result is consistent across calls.
+        let r1 = probe_openat2();
+        let r2 = probe_openat2();
+        assert_eq!(r1.is_ok(), r2.is_ok());
+    }
+
+    #[test]
+    fn kernel_version_is_cached() {
+        let v1 = kernel_version();
+        let v2 = kernel_version();
+        assert_eq!(v1, v2);
     }
 }
