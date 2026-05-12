@@ -26,7 +26,8 @@ fn ac1_traversal_returns_escape() {
 
     assert!(
         matches!(err, JailError::Escape { .. }),
-        "expected JailError::Escape, got: {:?}", err
+        "expected JailError::Escape, got: {:?}",
+        err
     );
 
     // Verify the error message is actionable
@@ -48,7 +49,8 @@ fn ac1_traversal_blocked_on_fallback() {
     // On macOS the fallback path-walk rejects with EscapedRoot
     assert!(
         matches!(err, JailError::EscapedRoot { .. }),
-        "expected EscapedRoot on fallback, got: {:?}", err
+        "expected EscapedRoot on fallback, got: {:?}",
+        err
     );
 }
 
@@ -70,8 +72,12 @@ fn ac2_symlink_escape_blocked() {
         .unwrap_err();
 
     assert!(
-        matches!(err, JailError::Escape { .. } | JailError::EscapedRoot { .. }),
-        "expected Escape or EscapedRoot, got: {:?}", err
+        matches!(
+            err,
+            JailError::Escape { .. } | JailError::EscapedRoot { .. }
+        ),
+        "expected Escape or EscapedRoot, got: {:?}",
+        err
     );
 }
 
@@ -104,7 +110,8 @@ fn ac3_magic_link_blocked() {
     // Either MagicLink (RESOLVE_NO_MAGICLINKS) or Escape (RESOLVE_BENEATH catches the root link)
     assert!(
         matches!(err, JailError::MagicLink { .. } | JailError::Escape { .. }),
-        "expected MagicLink or Escape for /proc/self/root, got: {:?}", err
+        "expected MagicLink or Escape for /proc/self/root, got: {:?}",
+        err
     );
 }
 
@@ -128,7 +135,10 @@ fn ac4_hard_link_detected() {
         .unwrap();
 
     // nlink should be 2 (original + hard link)
-    assert!(jf.has_hard_links(), "expected has_hard_links() = true for a hard-linked file");
+    assert!(
+        jf.has_hard_links(),
+        "expected has_hard_links() = true for a hard-linked file"
+    );
     assert_eq!(jf.attestation().nlink, 2);
 }
 
@@ -144,7 +154,10 @@ fn ac4_regular_file_has_no_extra_hard_links() {
         .open("solo.txt", OpenOptions::new().read(true))
         .unwrap();
 
-    assert!(!jf.has_hard_links(), "single-link file should not report has_hard_links()");
+    assert!(
+        !jf.has_hard_links(),
+        "single-link file should not report has_hard_links()"
+    );
     assert_eq!(jf.attestation().nlink, 1);
 }
 
@@ -160,10 +173,14 @@ fn ac5_content_bytes_deterministic() {
 
     let jail = FdJail::new(dir.path()).unwrap();
 
-    let jf1 = jail.open("report.pdf", OpenOptions::new().read(true)).unwrap();
+    let jf1 = jail
+        .open("report.pdf", OpenOptions::new().read(true))
+        .unwrap();
     // Small sleep to ensure opened_at differs if the clock has sufficient resolution
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let jf2 = jail.open("report.pdf", OpenOptions::new().read(true)).unwrap();
+    let jf2 = jail
+        .open("report.pdf", OpenOptions::new().read(true))
+        .unwrap();
 
     // content_bytes must be identical (excludes opened_at and signature)
     assert_eq!(
@@ -179,8 +196,14 @@ fn ac5_content_bytes_deterministic() {
     // signing_bytes (which include opened_at) must include all content_bytes
     let cb = jf1.attestation().content_bytes();
     let sb = jf1.attestation().signing_bytes();
-    assert!(sb.starts_with(&cb), "signing_bytes must start with content_bytes");
-    assert!(sb.len() > cb.len(), "signing_bytes must include extra timestamp bytes");
+    assert!(
+        sb.starts_with(&cb),
+        "signing_bytes must start with content_bytes"
+    );
+    assert!(
+        sb.len() > cb.len(),
+        "signing_bytes must include extra timestamp bytes"
+    );
 }
 
 // ── Criterion 6 ──────────────────────────────────────────────────────────────
@@ -195,7 +218,9 @@ fn ac6_attestation_wire_format() {
     std::fs::write(&file, b"bytes").unwrap();
 
     let jail = FdJail::new(dir.path()).unwrap();
-    let jf = jail.open("data.bin", OpenOptions::new().read(true)).unwrap();
+    let jf = jail
+        .open("data.bin", OpenOptions::new().read(true))
+        .unwrap();
     let att = jf.attestation();
 
     let cb = att.content_bytes();
@@ -255,7 +280,9 @@ fn ac8_api_surface_stable() {
     let jail = FdJail::new(dir.path()).unwrap();
 
     // open() returns JailFile with Read + attestation
-    let mut jf = jail.open("upload.bin", OpenOptions::new().read(true)).unwrap();
+    let mut jf = jail
+        .open("upload.bin", OpenOptions::new().read(true))
+        .unwrap();
     let mut buf = Vec::new();
     jf.read_to_end(&mut buf).unwrap();
     assert_eq!(buf, b"hello world");
@@ -268,13 +295,20 @@ fn ac8_api_surface_stable() {
 
     // create() fails if file exists
     let err = jail.create("upload.bin").unwrap_err();
-    assert!(matches!(err, JailError::Io(_)), "expected Io(AlreadyExists), got: {:?}", err);
+    assert!(
+        matches!(err, JailError::Io(_)),
+        "expected Io(AlreadyExists), got: {:?}",
+        err
+    );
 
     // create() succeeds for new files
     let mut jf2 = jail.create("new_file.bin").unwrap();
     jf2.write_all(b"written").unwrap();
     drop(jf2);
-    assert_eq!(std::fs::read(dir.path().join("new_file.bin")).unwrap(), b"written");
+    assert_eq!(
+        std::fs::read(dir.path().join("new_file.bin")).unwrap(),
+        b"written"
+    );
 
     // check() returns relative path (weaker — no fd held)
     let rel = jail.check("upload.bin").unwrap();
@@ -300,7 +334,10 @@ fn toctou_safe_reflects_platform() {
     assert!(jf.attestation().toctou_safe, "Linux should be TOCTOU-safe");
 
     #[cfg(not(target_os = "linux"))]
-    assert!(!jf.attestation().toctou_safe, "macOS/BSD fallback is not TOCTOU-safe");
+    assert!(
+        !jf.attestation().toctou_safe,
+        "macOS/BSD fallback is not TOCTOU-safe"
+    );
 }
 
 // ── no_symlinks option ────────────────────────────────────────────────────────
@@ -318,7 +355,8 @@ fn no_symlinks_rejects_symlink_inside_jail() {
     let jail = FdJail::new(dir.path()).unwrap();
 
     // Without no_symlinks: succeeds
-    jail.open("link.txt", OpenOptions::new().read(true)).unwrap();
+    jail.open("link.txt", OpenOptions::new().read(true))
+        .unwrap();
 
     // With no_symlinks: rejected
     let err = jail
@@ -326,6 +364,7 @@ fn no_symlinks_rejects_symlink_inside_jail() {
         .unwrap_err();
     assert!(
         matches!(err, JailError::SymlinkRejected { .. }),
-        "expected SymlinkRejected, got: {:?}", err
+        "expected SymlinkRejected, got: {:?}",
+        err
     );
 }

@@ -7,7 +7,6 @@ use std::path::PathBuf;
 #[non_exhaustive]
 pub enum JailError {
     // ── Original variants (path-based API) ────────────────────────────────────
-
     /// Path would escape the jail root (path-based API).
     EscapedRoot { attempted: PathBuf, root: PathBuf },
     /// Path contains a broken symlink (cannot verify target is safe).
@@ -18,7 +17,6 @@ pub enum JailError {
     InvalidRoot(PathBuf),
 
     // ── fd-first API variants ─────────────────────────────────────────────────
-
     /// `openat2` returned `EXDEV` — path escapes jail or traverses above root.
     ///
     /// Covers symlink escapes, `..` traversal, and absolute path injection.
@@ -41,14 +39,18 @@ pub enum JailError {
     ///
     /// Upgrade the kernel or use the path-based API (which is not TOCTOU-safe).
     #[cfg(all(feature = "fd-first", target_os = "linux"))]
-    UnsupportedKernel { version: crate::openat2::KernelVersion },
+    UnsupportedKernel {
+        version: crate::openat2::KernelVersion,
+    },
 
     /// Invalid root in the fd-first API (not a directory, filesystem root, or inaccessible).
     #[cfg(feature = "fd-first")]
-    InvalidJailRoot { path: PathBuf, source: std::io::Error },
+    InvalidJailRoot {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 
     // ── Shared ────────────────────────────────────────────────────────────────
-
     /// Underlying I/O error.
     Io(std::io::Error),
 }
@@ -58,11 +60,15 @@ impl fmt::Display for JailError {
         match self {
             // Path-based variants
             Self::EscapedRoot { attempted, root } => write!(
-                f, "path '{}' escapes jail root '{}'",
-                attempted.display(), root.display()
+                f,
+                "path '{}' escapes jail root '{}'",
+                attempted.display(),
+                root.display()
             ),
             Self::BrokenSymlink(path) => write!(
-                f, "broken symlink at '{}' (cannot verify target)", path.display()
+                f,
+                "broken symlink at '{}' (cannot verify target)",
+                path.display()
             ),
             Self::InvalidPath(reason) => write!(f, "invalid path: {}", reason),
             Self::InvalidRoot(path) => {
@@ -79,24 +85,32 @@ impl fmt::Display for JailError {
             // fd-first variants
             #[cfg(feature = "fd-first")]
             Self::Escape { requested } => write!(
-                f, "path '{}' escapes jail (openat2 EXDEV)", requested.display()
+                f,
+                "path '{}' escapes jail (openat2 EXDEV)",
+                requested.display()
             ),
             #[cfg(feature = "fd-first")]
             Self::SymlinkRejected { requested } => write!(
-                f, "symlink rejected for path '{}' (ELOOP / no_symlinks policy)", requested.display()
+                f,
+                "symlink rejected for path '{}' (ELOOP / no_symlinks policy)",
+                requested.display()
             ),
             #[cfg(feature = "fd-first")]
             Self::MagicLink { requested } => write!(
-                f, "magic link detected for path '{}' (RESOLVE_NO_MAGICLINKS)", requested.display()
+                f,
+                "magic link detected for path '{}' (RESOLVE_NO_MAGICLINKS)",
+                requested.display()
             ),
             #[cfg(all(feature = "fd-first", target_os = "linux"))]
             Self::UnsupportedKernel { version } => write!(
-                f, "openat2 not available on kernel {} (requires >= 5.6)", version
+                f,
+                "openat2 not available on kernel {} (requires >= 5.6)",
+                version
             ),
             #[cfg(feature = "fd-first")]
-            Self::InvalidJailRoot { path, source } => write!(
-                f, "invalid jail root '{}': {}", path.display(), source
-            ),
+            Self::InvalidJailRoot { path, source } => {
+                write!(f, "invalid jail root '{}': {}", path.display(), source)
+            }
 
             Self::Io(err) => write!(f, "io error: {}", err),
         }

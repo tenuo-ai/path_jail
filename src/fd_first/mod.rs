@@ -6,4 +6,4 @@
 
 mod fd_jail;
 
-pub use fd_jail::{FdJail, JailFile, Attestation, OpenOptions};
+pub use fd_jail::{Attestation, FdJail, JailFile, OpenOptions};
