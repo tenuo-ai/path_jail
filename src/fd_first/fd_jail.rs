@@ -19,19 +19,11 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-// ── Platform dispatch ─────────────────────────────────────────────────────────
-
+// Linux imports — gated so macOS builds don't see unused-import warnings.
 #[cfg(target_os = "linux")]
-use crate::openat2::{
-    kernel_version, probe_openat2, KernelVersion, OpenHow, MIN_OPENAT2_KERNEL, O_APPEND, O_CLOEXEC,
-    O_CREAT, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS,
-    RESOLVE_NO_SYMLINKS,
-};
+use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MIN_OPENAT2_KERNEL};
 
-#[cfg(target_os = "linux")]
-use crate::openat2::{openat2, Errno};
-
-// macOS/BSD: no platform import needed; fallback_impl is self-contained
+// macOS/BSD: fallback_impl is self-contained.
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -287,12 +279,11 @@ impl OpenOptions {
 mod linux_impl {
     use super::*;
     use crate::openat2::{
-        kernel_version, openat2, probe_openat2, Errno, KernelVersion, OpenHow, MIN_OPENAT2_KERNEL,
-        O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, RESOLVE_BENEATH,
-        RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
+        openat2, Errno, OpenHow, O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY,
+        RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
     };
     use std::ffi::CString;
-    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
     /// Implementation of `Jail::open_file` on Linux using `openat2`.
     pub(crate) fn jail_open(
@@ -437,11 +428,6 @@ mod linux_impl {
             nlink: s.st_nlink,
         })
     }
-
-    /// fstat the dirfd at Jail::new time to pin the root inode.
-    pub(crate) fn stat_dirfd(fd: &OwnedFd) -> std::io::Result<StatResult> {
-        fstat(fd.as_raw_fd())
-    }
 }
 
 // ── macOS / BSD fallback ──────────────────────────────────────────────────────
@@ -562,27 +548,25 @@ impl FdJail {
 
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::fs::OpenOptionsExt;
             use std::os::unix::io::{AsRawFd, FromRawFd};
 
             // Check kernel version first for a friendly error message.
-            if let Some(kv) = crate::openat2::kernel_version() {
+            if let Some(kv) = openat2_kernel_version() {
                 if kv < MIN_OPENAT2_KERNEL {
                     return Err(JailError::UnsupportedKernel { version: Some(kv) });
                 }
             }
             // Probe via actual syscall — authoritative even in containers that
             // hide the kernel version.
-            crate::openat2::probe_openat2().map_err(|_| JailError::UnsupportedKernel {
-                // kernel_version() is cached; if /proc was unavailable above it
-                // is still None here — which is valid for Option<KernelVersion>.
-                version: crate::openat2::kernel_version(),
+            probe_openat2().map_err(|_| JailError::UnsupportedKernel {
+                version: openat2_kernel_version(),
             })?;
 
             // Open the jail root directory with O_DIRECTORY so the fd is a
             // directory fd we can use as `dirfd` for subsequent openat2 calls.
             // We use std::fs::File for the open itself to avoid duplicating
             // another raw path-to-fd helper.
-            use std::os::unix::fs::OpenOptionsExt;
             let dir_file = std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc_open_directory_flags())
