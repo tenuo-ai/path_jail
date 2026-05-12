@@ -27,7 +27,7 @@ use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MI
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// A file opened through `Jail::open` or `Jail::create` (fd-first API).
+/// A file opened through [`FdJail::open`] or [`FdJail::create`] (fd-first API).
 ///
 /// Holds both the open file descriptor and attestation data recorded at open
 /// time. On Linux 5.6+ the open is performed by a single `openat2` syscall and
@@ -62,9 +62,9 @@ impl JailFile {
     /// reading or writing:
     ///
     /// ```no_run
-    /// # use path_jail::{Jail, fd_first::OpenOptions};
-    /// # let jail = Jail::new("/var/uploads").unwrap();
-    /// let jf = jail.open_file("report.pdf", OpenOptions::new().read(true)).unwrap();
+    /// # use path_jail::fd_first::{FdJail, OpenOptions};
+    /// # let jail = FdJail::new("/var/uploads").unwrap();
+    /// let jf = jail.open("report.pdf", OpenOptions::new().read(true)).unwrap();
     /// if jf.has_hard_links() {
     ///     // Reject — policy violation
     ///     return;
@@ -285,7 +285,7 @@ mod linux_impl {
     use std::ffi::CString;
     use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
-    /// Implementation of `Jail::open_file` on Linux using `openat2`.
+    /// Implementation of [`FdJail::open`] on Linux using `openat2`.
     pub(crate) fn jail_open(
         dirfd: &OwnedFd,
         jail_root: &Path,
