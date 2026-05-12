@@ -53,12 +53,14 @@ let path2 = jail.join("data.csv")?;
 
 ## Features
 
-- **Zero dependencies** - only stdlib (optional `secure-open` feature for TOCTOU protection)
+- **Zero dependencies** - only stdlib
 - **Symlink-safe** - resolves and validates symlinks
 - **Works for new files** - validates paths that don't exist yet
 - **Type-safe paths** - optional `JailedPath` newtype prevents confused deputy bugs
 - **Segment joining** - safely build paths from user IDs, filenames, etc.
 - **Helpful errors** - tells you what went wrong and why
+- **`secure-open` feature** (Unix) - `O_NOFOLLOW`-protected opens; zero extra deps
+- **`fd-first` feature** (Linux 5.6+) - kernel-enforced TOCTOU safety via `openat2(RESOLVE_BENEATH)`; `O_NOFOLLOW` fallback on macOS/BSD
 
 ## Security
 
@@ -84,9 +86,10 @@ This library validates paths. It does not hold file descriptors.
 - Confused deputy attacks from untrusted input
 
 **Does not defend against:**
-- Malicious local processes racing your I/O
+- Malicious local processes racing your I/O (use the `fd-first` feature for kernel-enforced protection on Linux 5.6+)
 
-For kernel-enforced sandboxing, use [`cap-std`](https://docs.rs/cap-std).
+For kernel-enforced sandboxing without leaving the `path_jail` API, enable the [`fd-first` feature](#fd-first-kernel-enforced-toctou-safety-linux-56). For a
+capability-based alternative that replaces `std::fs` entirely, see [`cap-std`](https://docs.rs/cap-std).
 
 ### Platform-Specific Edge Cases
 
@@ -125,7 +128,8 @@ std::fs::write(&path, data)?;        // Escapes!
 ```
 
 **Mitigations:**
-- Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (see below)
+- Enable the `fd-first` feature on Linux 5.6+: a single `openat2(RESOLVE_BENEATH)` syscall makes the validate-and-open atomic (see [below](#fd-first-kernel-enforced-toctou-safety-linux-56))
+- Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (protects the final component only)
 - Use container/chroot isolation
 
 #### Windows Reserved Device Names
@@ -441,13 +445,15 @@ async fn upload(
 }
 ```
 
-## TOCTOU-Safe File Operations (Unix)
+## TOCTOU-Safe File Operations
+
+### `secure-open` — O_NOFOLLOW protection (all Unix)
 
 Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations:
 
 ```toml
 [dependencies]
-path_jail = { version = "0.3", features = ["secure-open"] }
+path_jail = { version = "0.4", features = ["secure-open"] }
 ```
 
 ```rust
@@ -470,24 +476,73 @@ let file = jail.create_or_truncate("data.txt")?;  // Truncate if exists
 let file = jail.open_append("log.txt")?;           // Append mode
 ```
 
-This protects against symlink swap attacks between validation and file open. Zero additional dependencies.
+This protects against symlink swap attacks on the **final path component**. Zero additional dependencies.
 
-**Limitation:** Protects the final path component only. For full TOCTOU protection against intermediate directory attacks, use `cap-std`.
+**Limitation:** Protects the final path component only. An attacker who can swap an intermediate directory between path validation and the open call can still escape.
+
+---
+
+### `fd-first` — Kernel-enforced TOCTOU safety (Linux 5.6+)
+
+The `fd-first` feature uses a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall. Because the validate-and-open is **atomic at the kernel level**, there is no window for a race condition:
+
+```toml
+[dependencies]
+path_jail = { version = "0.4", features = ["fd-first"] }
+```
+
+```rust
+use path_jail::fd_first::{FdJail, OpenOptions};
+use std::io::Read;
+
+// Pin the jail root as a file descriptor — renames of the root after this
+// point are invisible to the jail.
+let jail = FdJail::new("/var/uploads")?;
+
+// TOCTOU-safe open: one syscall, kernel-enforced containment
+let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
+let mut buf = Vec::new();
+jf.read_to_end(&mut buf)?;
+
+// Every open captures an Attestation with inode, device, nlink, and timestamp
+let att = jf.attestation();
+assert!(att.toctou_safe);            // true on Linux 5.6+
+assert!(att.signature.is_none());    // None until Ed25519 key is configured
+
+// Detect hard links (data exfiltration vector)
+if jf.has_hard_links() {
+    return Err("hard link policy violation");
+}
+
+// Create a new file — fails if it already exists
+let mut out = jail.create("output.bin")?;
+out.write_all(b"processed")?;
+```
+
+**On macOS/BSD:** falls back to an `O_NOFOLLOW`-based open (same protection as `secure-open`). `attestation().toctou_safe` will be `false`.
+
+**Blocked by `openat2`:**
+- Symlink escapes (`/etc` link inside jail) → `JailError::Escape`
+- `..` traversal → `JailError::Escape`
+- `/proc/self/root` and other magic links → `JailError::MagicLink`
+- Symlinks when `no_symlinks(true)` → `JailError::SymlinkRejected`
+
+**Returns `JailError::UnsupportedKernel`** on Linux kernels older than 5.6. Zero additional dependencies — raw syscall, no libc.
 
 ## Alternatives
 
 | | path_jail | strict-path | cap-std |
 |-|-----------|-------------|---------|
-| Approach | Path validation | Type-safe path system | File descriptors |
-| Returns | `PathBuf` / `JailedPath` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
+| Approach | Path validation + fd-first | Type-safe path system | File descriptors |
+| Returns | `PathBuf` / `JailedPath` / `JailFile` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
 | Dependencies | 0 | ~5 | ~10 |
-| TOCTOU-safe | With `secure-open`* | No | Yes |
-| Best for | Simple file sandboxing | Complex type-safe paths | Kernel-enforced security |
+| TOCTOU-safe | `fd-first` (Linux 5.6+, kernel-enforced) / `secure-open` (final component, all Unix) | No | Yes |
+| Best for | File sandboxing with optional kernel enforcement | Complex type-safe paths | Full capability-based security |
 
 - [`strict-path`](https://crates.io/crates/strict-path) - More comprehensive, uses marker types for compile-time guarantees
-- [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but different API than `std::fs`
+- [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but replaces `std::fs` entirely
 
-*With `secure-open`: Safe against remote attackers and symlink attacks on the final path component. Not safe against local attackers who can swap intermediate directories. See [TOCTOU Race Conditions](#toctou-race-conditions).
+*`fd-first` on Linux 5.6+: the validate-and-open is a single `openat2` syscall — truly atomic, no race window. On macOS/BSD the same API falls back to `O_NOFOLLOW` (final component only).*
 
 ## Thread Safety
 
