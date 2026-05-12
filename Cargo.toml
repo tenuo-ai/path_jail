@@ -9,6 +9,12 @@ repository = "https://github.com/tenuo-ai/path_jail"
 homepage = "https://tenuo.ai"
 keywords = ["security", "filesystem", "sandbox", "path", "traversal"]
 categories = ["filesystem", "security"]
+exclude = [
+    "docs/",          # design specs — not needed by crate consumers
+    ".claude/",       # IDE settings
+    ".github/",       # CI config
+    "tests/",         # integration tests (already excluded by cargo by default, explicit for clarity)
+]
 
 [features]
 default = []

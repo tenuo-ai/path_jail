@@ -225,6 +225,17 @@ fn encode_path_field(buf: &mut Vec<u8>, path: &Path) {
 /// Options for opening a file through the fd-first API.
 ///
 /// Mirrors the relevant subset of [`std::fs::OpenOptions`].
+///
+/// # Mount-point containment note
+///
+/// `RESOLVE_NO_XDEV` (block cross-device traversal) is intentionally **not**
+/// exposed. The spec's containment model is *directory-tree* containment, not
+/// *filesystem-volume* containment. Bind mounts and overlayfs layers that are
+/// mounted inside the jail root are accessible by design — they are part of the
+/// logical directory tree as seen by the kernel. If your security policy
+/// requires strict filesystem-level containment (e.g., no bind-mount escapes
+/// in a container runtime), add `RESOLVE_NO_XDEV` to the `resolve` field of
+/// the `OpenHow` struct used internally, or open a feature request.
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     pub(crate) read: bool,
@@ -267,6 +278,9 @@ impl OpenOptions {
         self
     }
     /// Reject any symlinks inside the jail (Linux: `RESOLVE_NO_SYMLINKS`).
+    ///
+    /// On the macOS/BSD fallback this is a no-op — `O_NOFOLLOW` protects only
+    /// the final path component; intermediate symlinks are not blocked.
     pub fn no_symlinks(mut self, v: bool) -> Self {
         self.no_symlinks = v;
         self
@@ -303,16 +317,17 @@ mod linux_impl {
         let cpath = CString::new(path_str)
             .map_err(|_| JailError::InvalidPath("could not convert path to C string".into()))?;
 
-        // Build O_* flags
+        // Build O_* flags. Precedence: append > write > read.
+        // append implies write (POSIX), so we set both in one branch to avoid
+        // double-OR'ing O_WRONLY when the caller sets both .write(true).append(true).
         let mut flags: u64 = O_CLOEXEC;
-        if opts.read && !opts.write && !opts.append {
-            flags |= O_RDONLY;
-        }
-        if opts.write {
-            flags |= O_WRONLY;
-        }
         if opts.append {
             flags |= O_APPEND | O_WRONLY;
+        } else if opts.write {
+            flags |= O_WRONLY;
+        } else {
+            // read-only is the default (O_RDONLY = 0, but set explicitly for clarity)
+            flags |= O_RDONLY;
         }
         if opts.create {
             flags |= O_CREAT;
@@ -322,10 +337,6 @@ mod linux_impl {
         }
         if opts.truncate {
             flags |= O_TRUNC;
-        }
-        // Default: read-only
-        if flags == O_CLOEXEC {
-            flags |= O_RDONLY;
         }
 
         // Build RESOLVE_* flags
@@ -437,11 +448,8 @@ mod fallback_impl {
     use super::*;
     use std::os::unix::fs::OpenOptionsExt;
 
-    // O_NOFOLLOW — protects the final path component only
-    #[cfg(target_os = "macos")]
+    // O_NOFOLLOW is 0x0100 on macOS and all BSDs — no cfg needed.
     const O_NOFOLLOW: i32 = 0x0100;
-    #[cfg(not(target_os = "macos"))]
-    const O_NOFOLLOW: i32 = 0x0100; // same on *BSDs
 
     pub(crate) fn jail_open(
         jail_root: &Path,

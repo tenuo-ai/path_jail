@@ -206,13 +206,16 @@ fn ac5_content_bytes_deterministic() {
     );
 }
 
-// ── Criterion 6 ──────────────────────────────────────────────────────────────
-// (Signing is behind the Ed25519 feature which requires an external key;
-//  we test the wire format is deterministic and content_bytes matches.)
+// ── Criterion 6 (partial) ────────────────────────────────────────────────────
+// Spec AC6: "Signed attestation verifies under configured key."
+// Ed25519 signing requires an external key and is future work (tracked separately).
+// This test covers the prerequisite: the wire format encodes fields correctly
+// and signature is None when no key is configured.
+// TODO(ac6): add signing verification once the Ed25519 feature is implemented.
 
 #[test]
 #[cfg(unix)]
-fn ac6_attestation_wire_format() {
+fn ac6_partial_attestation_wire_format_and_unsigned() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("data.bin");
     std::fs::write(&file, b"bytes").unwrap();
@@ -238,7 +241,7 @@ fn ac6_attestation_wire_format() {
     assert_eq!(path_len, path_bytes.len());
     assert_eq!(&cb[off + 4..off + 4 + path_len], path_bytes);
 
-    // Signature is None (no key configured)
+    // Signature is None (no key configured — full AC6 is pending Ed25519 feature)
     assert!(att.signature.is_none());
 }
 
