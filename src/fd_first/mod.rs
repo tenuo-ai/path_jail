@@ -1,0 +1,9 @@
+//! fd-first API for TOCTOU-safe file access via `openat2(RESOLVE_BENEATH)`.
+//!
+//! This module is only available with the `fd-first` feature enabled.
+//!
+//! See the [crate-level documentation](crate) for a quick-start example.
+
+mod fd_jail;
+
+pub use fd_jail::{FdJail, JailFile, Attestation, OpenOptions};

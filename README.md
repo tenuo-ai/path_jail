@@ -8,6 +8,8 @@
 
 A zero-dependency filesystem sandbox for Rust. Restricts paths to a root directory, preventing traversal attacks while supporting files that don't exist yet.
 
+Maintained by **[Tenuo](https://tenuo.ai)** — visit us at [tenuo.ai](https://tenuo.ai).
+
 **Python bindings:** [`path-jail`](https://github.com/tenuo-ai/path-jail-python) on PyPI
 
 ## Installation
@@ -511,6 +513,8 @@ Minimum Supported Rust Version: **1.80**
 This crate tracks recent stable Rust. We use `LazyLock` for ergonomic static initialization in examples.
 
 ## Development
+
+This crate is maintained by [Tenuo](https://tenuo.ai). Contributions are welcome!
 
 ```bash
 git clone https://github.com/tenuo-ai/path_jail.git
