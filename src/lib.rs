@@ -86,7 +86,9 @@ mod error;
 mod jail;
 mod jailed_path;
 
-#[cfg(feature = "secure-open")]
+// `secure-open` is Unix-only (uses `OpenOptionsExt::custom_flags`).
+// On Windows, enabling the feature is a no-op rather than a build error.
+#[cfg(all(feature = "secure-open", unix))]
 mod open;
 
 #[cfg(all(feature = "guard", target_os = "linux"))]
@@ -105,7 +107,7 @@ pub use error::JailError;
 pub use jail::Jail;
 pub use jailed_path::JailedPath;
 
-#[cfg(feature = "secure-open")]
+#[cfg(all(feature = "secure-open", unix))]
 pub use open::JailedFile;
 
 /// Validate a path in one shot.
