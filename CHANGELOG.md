@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-13
+
+### Added
+
+- **`guard` feature** (formerly `fd-first`): kernel-enforced TOCTOU-safe file access via `openat2(RESOLVE_BENEATH)` on Linux 5.6+
+  - `guard::FdJail` pins a directory fd at construction; root renames after `FdJail::new` are ignored
+  - `FdJail::open()` / `FdJail::create()` perform a single TOCTOU-safe syscall on Linux
+  - `FdJail::check()` validates a path without opening (logging/display only — must not be used as the basis for a subsequent open)
+  - `Attestation` records `jail_root`, `opened_path`, `root_inode`, `file_inode`, `device`, `nlink`, `toctou_safe`, `opened_at`
+  - `Attestation::content_bytes()` for deterministic comparison; `signing_bytes()` for future Ed25519 signing
+  - `OpenOptions` with `read`/`write`/`append`/`truncate`/`create`/`create_new`/`no_symlinks`
+  - `JailFile::has_hard_links()` exposes hard-link policy; library does not enforce, caller decides
+  - macOS/BSD fallback via `O_NOFOLLOW`; `Attestation::toctou_safe` is `false` on the fallback path
+- New error variants (guarded by `guard` feature): `Escape`, `SymlinkRejected`, `MagicLink`, `UnsupportedKernel`, `InvalidJailRoot`
+
+### Changed
+
+- **Breaking**: MSRV bumped from 1.80 to 1.85 to accommodate transitive dev-dependencies that require Cargo edition 2024
+- Crate package now `exclude`s `docs/`, `.claude/`, `.github/`, `tests/`
+
+### Notes
+
+- The `guard` feature uses only `std` and raw syscalls — zero new runtime dependencies
+- `guard` is currently x86_64 Linux only for the raw-asm `openat2` path; aarch64/riscv64 support is planned
+
 ## [0.3.0] - 2026-01-05
 
 ### Added

@@ -539,8 +539,9 @@ impl FdJail {
     /// Open the jail root directory and pin its inode.
     ///
     /// On Linux 5.6+ this also verifies that `openat2` is available.
-    /// Returns `JailError::UnsupportedKernel` if the kernel is too old
-    /// and the `fd-first-fallback` feature is not enabled.
+    /// Returns `JailError::UnsupportedKernel` on Linux < 5.6. On macOS/BSD the
+    /// fallback path is used unconditionally (no separate feature gate); see
+    /// [`Attestation::toctou_safe`] to detect fallback at runtime.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, JailError> {
         let root = root.as_ref().canonicalize().map_err(JailError::Io)?;
 

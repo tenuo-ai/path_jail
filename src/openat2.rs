@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 // broken binaries on aarch64 CI runners.
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!(
-    "path_jail fd-first: only x86_64 Linux is currently supported for the raw-asm syscall path. \
+    "path_jail guard: only x86_64 Linux is currently supported for the raw-asm syscall path. \
      aarch64/riscv64 support is planned. Track: https://github.com/tenuo-ai/path_jail/issues"
 );
 

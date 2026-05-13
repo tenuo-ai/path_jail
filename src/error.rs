@@ -85,7 +85,7 @@ impl fmt::Display for JailError {
                 write!(f, "invalid jail root '{}' ({})", path.display(), reason)
             }
 
-            // fd-first variants
+            // guard variants
             #[cfg(feature = "guard")]
             Self::Escape { requested } => write!(
                 f,

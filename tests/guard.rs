@@ -1,7 +1,7 @@
 //! Integration tests for the guard API (acceptance criteria from the spec).
 //!
 //! These tests correspond 1:1 to the spec's acceptance criteria table.
-//! Run with: `cargo test --features fd-first`
+//! Run with: `cargo test --features guard`
 
 #![cfg(feature = "guard")]
 

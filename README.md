@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/path_jail.svg)](https://crates.io/crates/path_jail)
 [![docs.rs](https://img.shields.io/docsrs/path_jail)](https://docs.rs/path_jail)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/tenuo-ai/path_jail#license)
-[![MSRV](https://img.shields.io/badge/MSRV-1.80-blue.svg)](https://github.com/tenuo-ai/path_jail)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://github.com/tenuo-ai/path_jail)
 
 A zero-dependency filesystem sandbox for Rust. Restricts paths to a root directory, preventing traversal attacks while supporting files that don't exist yet.
 
@@ -88,7 +88,7 @@ This library validates paths. It does not hold file descriptors.
 **Does not defend against:**
 - Malicious local processes racing your I/O (use the `guard` feature for kernel-enforced protection on Linux 5.6+)
 
-For kernel-enforced sandboxing without leaving the `path_jail` API, enable the [`guard` feature](#fd-first-kernel-enforced-toctou-safety-linux-56). For a
+For kernel-enforced sandboxing without leaving the `path_jail` API, enable the [`guard` feature](#guard--kernel-enforced-toctou-safety-linux-56). For a
 capability-based alternative that replaces `std::fs` entirely, see [`cap-std`](https://docs.rs/cap-std).
 
 ### Platform-Specific Edge Cases
@@ -128,7 +128,7 @@ std::fs::write(&path, data)?;        // Escapes!
 ```
 
 **Mitigations:**
-- Enable the `guard` feature on Linux 5.6+: a single `openat2(RESOLVE_BENEATH)` syscall makes the validate-and-open atomic (see [below](#fd-first-kernel-enforced-toctou-safety-linux-56))
+- Enable the `guard` feature on Linux 5.6+: a single `openat2(RESOLVE_BENEATH)` syscall makes the validate-and-open atomic (see [below](#guard--kernel-enforced-toctou-safety-linux-56))
 - Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (protects the final component only)
 - Use container/chroot isolation
 
@@ -563,9 +563,9 @@ std::thread::spawn(move || {
 
 ## MSRV
 
-Minimum Supported Rust Version: **1.80**
+Minimum Supported Rust Version: **1.85**
 
-This crate tracks recent stable Rust. We use `LazyLock` for ergonomic static initialization in examples.
+This crate tracks recent stable Rust. The MSRV is bumped to 1.85 to accommodate transitive dev-dependencies that require edition 2024.
 
 ## Development
 
