@@ -448,11 +448,20 @@ mod linux_impl {
     }
 
     fn map_errno_to_jail_error(e: Errno, path: &Path) -> JailError {
+        // openat2(2) consolidates magic-link rejection (RESOLVE_NO_MAGICLINKS)
+        // and symlink rejection (RESOLVE_NO_SYMLINKS / symlink loop) into the
+        // SAME errno: ELOOP. Userspace cannot distinguish a magic-link
+        // rejection from an ordinary symlink rejection from the errno alone.
+        // We therefore map ELOOP to `SymlinkRejected` uniformly; the
+        // `MagicLink` variant is reserved for a future kernel ABI change that
+        // separates the two (e.g., a distinct ENOLINK or new errno).
         match e {
-            Errno::EXDEV => JailError::Escape { requested: path.to_path_buf() },
-            Errno::ELOOP => JailError::SymlinkRejected { requested: path.to_path_buf() },
-            _ if e.raw() == 105 /* ENOLINK — magic link on some kernels */ =>
-                JailError::MagicLink { requested: path.to_path_buf() },
+            Errno::EXDEV => JailError::Escape {
+                requested: path.to_path_buf(),
+            },
+            Errno::ELOOP => JailError::SymlinkRejected {
+                requested: path.to_path_buf(),
+            },
             _ => JailError::Io(e.into()),
         }
     }

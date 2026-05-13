@@ -169,10 +169,19 @@ fn ac3_magic_link_blocked() {
         .open("self/root/etc/passwd", OpenOptions::new().read(true))
         .unwrap_err();
 
-    // Either MagicLink (RESOLVE_NO_MAGICLINKS) or Escape (RESOLVE_BENEATH catches the root link)
+    // The kernel returns ELOOP for RESOLVE_NO_MAGICLINKS rejections, which
+    // we map to SymlinkRejected — userspace cannot distinguish a magic-link
+    // rejection from a regular symlink rejection (see JailError::MagicLink
+    // docs). Escape (EXDEV) is also acceptable if the kernel resolved
+    // /proc/self/root as a regular link before noticing the cross-mount.
     assert!(
-        matches!(err, JailError::MagicLink { .. } | JailError::Escape { .. }),
-        "expected MagicLink or Escape for /proc/self/root, got: {:?}",
+        matches!(
+            err,
+            JailError::MagicLink { .. }
+                | JailError::Escape { .. }
+                | JailError::SymlinkRejected { .. }
+        ),
+        "expected MagicLink, Escape, or SymlinkRejected for /proc/self/root, got: {:?}",
         err
     );
 }
