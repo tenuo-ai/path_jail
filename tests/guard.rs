@@ -3,7 +3,7 @@
 //! These tests correspond 1:1 to the spec's acceptance criteria table.
 //! Run with: `cargo test --features guard`
 
-#![cfg(feature = "guard")]
+#![cfg(all(feature = "guard", unix))]
 
 use path_jail::guard::{FdJail, OpenOptions, Signer, Verifier, VerifyError};
 use path_jail::JailError;
