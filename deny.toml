@@ -1,0 +1,66 @@
+# cargo-deny configuration for path_jail
+#
+# Run locally:
+#   cargo install cargo-deny
+#   cargo deny check
+#
+# Enforced in CI by .github/workflows/ci.yml (job: deny).
+
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ── Security advisories ──────────────────────────────────────────────────────
+# RustSec advisory database. New advisories MUST be triaged within the SLA
+# documented in SECURITY.md.
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+# ── Licenses ────────────────────────────────────────────────────────────────
+# Permissive licenses only. If a transitive dep brings in something else,
+# the build fails until it's reviewed.
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+    "CC0-1.0",
+]
+
+# ── Dependency bans ─────────────────────────────────────────────────────────
+# path_jail is a security library — duplicate versions and wildcards are
+# both signals worth flagging.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Empty by default; populate when a specific crate must be banned.
+deny = []
+
+# ── Source restrictions ─────────────────────────────────────────────────────
+# Crates must come from crates.io. No git deps, no private registries.
+# (When this changes — e.g., to consume a private Tenuo crate — explicitly
+# allowlist the registry/git URL here so the decision is reviewable.)
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
