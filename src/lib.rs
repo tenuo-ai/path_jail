@@ -24,6 +24,32 @@
 //! # Ok::<(), path_jail::JailError>(())
 //! ```
 //!
+//! # TOCTOU-Safe File Operations (guard API)
+//!
+//! Enable the `guard` feature for kernel-enforced containment via
+//! `openat2(RESOLVE_BENEATH)` on Linux 5.6+:
+//!
+//! ```toml
+//! [dependencies]
+//! path_jail = { version = "0.4", features = ["guard"] }
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "guard")] {
+//! use path_jail::guard::{FdJail, OpenOptions};
+//!
+//! let jail = FdJail::new("/var/uploads")?;
+//! let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
+//! if jf.has_hard_links() {
+//!     // Enforce hard-link policy here
+//! }
+//! use std::io::Read;
+//! let mut buf = Vec::new();
+//! jf.read_to_end(&mut buf)?;
+//! # }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # Type-Safe Paths
 //!
 //! For compile-time guarantees, use [`JailedPath`]:
@@ -51,7 +77,10 @@
 //! - Null byte injection (`file\x00.txt`)
 //! - Broken symlinks (cannot verify target)
 //!
-//! See [`Jail`] for details on the security model.
+//! With `guard`: all of the above plus TOCTOU races, magic links
+//! (`/proc/self/fd`), and intermediate directory attacks (Linux 5.6+).
+//!
+//! See [`Jail`] and [`guard::FdJail`] for details.
 
 mod error;
 mod jail;
@@ -59,6 +88,13 @@ mod jailed_path;
 
 #[cfg(feature = "secure-open")]
 mod open;
+
+#[cfg(feature = "guard")]
+#[cfg(target_os = "linux")]
+pub(crate) mod openat2;
+
+#[cfg(feature = "guard")]
+pub mod guard;
 
 use std::path::{Path, PathBuf};
 

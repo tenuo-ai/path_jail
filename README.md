@@ -4,9 +4,11 @@
 [![Crates.io](https://img.shields.io/crates/v/path_jail.svg)](https://crates.io/crates/path_jail)
 [![docs.rs](https://img.shields.io/docsrs/path_jail)](https://docs.rs/path_jail)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/tenuo-ai/path_jail#license)
-[![MSRV](https://img.shields.io/badge/MSRV-1.80-blue.svg)](https://github.com/tenuo-ai/path_jail)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://github.com/tenuo-ai/path_jail)
 
 A zero-dependency filesystem sandbox for Rust. Restricts paths to a root directory, preventing traversal attacks while supporting files that don't exist yet.
+
+Maintained by **[Tenuo](https://tenuo.ai)** — visit us at [tenuo.ai](https://tenuo.ai).
 
 **Python bindings:** [`path-jail`](https://github.com/tenuo-ai/path-jail-python) on PyPI
 
@@ -51,12 +53,14 @@ let path2 = jail.join("data.csv")?;
 
 ## Features
 
-- **Zero dependencies** - only stdlib (optional `secure-open` feature for TOCTOU protection)
+- **Zero dependencies** - only stdlib
 - **Symlink-safe** - resolves and validates symlinks
 - **Works for new files** - validates paths that don't exist yet
 - **Type-safe paths** - optional `JailedPath` newtype prevents confused deputy bugs
 - **Segment joining** - safely build paths from user IDs, filenames, etc.
 - **Helpful errors** - tells you what went wrong and why
+- **`secure-open` feature** (Unix) - `O_NOFOLLOW`-protected opens; zero extra deps
+- **`guard` feature** (Linux 5.6+) - kernel-enforced TOCTOU safety via `openat2(RESOLVE_BENEATH)`; `O_NOFOLLOW` fallback on macOS/BSD
 
 ## Security
 
@@ -82,9 +86,10 @@ This library validates paths. It does not hold file descriptors.
 - Confused deputy attacks from untrusted input
 
 **Does not defend against:**
-- Malicious local processes racing your I/O
+- Malicious local processes racing your I/O (use the `guard` feature for kernel-enforced protection on Linux 5.6+)
 
-For kernel-enforced sandboxing, use [`cap-std`](https://docs.rs/cap-std).
+For kernel-enforced sandboxing without leaving the `path_jail` API, enable the [`guard` feature](#guard--kernel-enforced-toctou-safety-linux-56). For a
+capability-based alternative that replaces `std::fs` entirely, see [`cap-std`](https://docs.rs/cap-std).
 
 ### Platform-Specific Edge Cases
 
@@ -123,7 +128,8 @@ std::fs::write(&path, data)?;        // Escapes!
 ```
 
 **Mitigations:**
-- Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (see below)
+- Enable the `guard` feature on Linux 5.6+: a single `openat2(RESOLVE_BENEATH)` syscall makes the validate-and-open atomic (see [below](#guard--kernel-enforced-toctou-safety-linux-56))
+- Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations (protects the final component only)
 - Use container/chroot isolation
 
 #### Windows Reserved Device Names
@@ -439,13 +445,15 @@ async fn upload(
 }
 ```
 
-## TOCTOU-Safe File Operations (Unix)
+## TOCTOU-Safe File Operations
+
+### `secure-open` — O_NOFOLLOW protection (all Unix)
 
 Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations:
 
 ```toml
 [dependencies]
-path_jail = { version = "0.3", features = ["secure-open"] }
+path_jail = { version = "0.4", features = ["secure-open"] }
 ```
 
 ```rust
@@ -468,24 +476,73 @@ let file = jail.create_or_truncate("data.txt")?;  // Truncate if exists
 let file = jail.open_append("log.txt")?;           // Append mode
 ```
 
-This protects against symlink swap attacks between validation and file open. Zero additional dependencies.
+This protects against symlink swap attacks on the **final path component**. Zero additional dependencies.
 
-**Limitation:** Protects the final path component only. For full TOCTOU protection against intermediate directory attacks, use `cap-std`.
+**Limitation:** Protects the final path component only. An attacker who can swap an intermediate directory between path validation and the open call can still escape.
+
+---
+
+### `guard` — Kernel-enforced TOCTOU safety (Linux 5.6+)
+
+The `guard` feature uses a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall. Because the validate-and-open is **atomic at the kernel level**, there is no window for a race condition:
+
+```toml
+[dependencies]
+path_jail = { version = "0.4", features = ["guard"] }
+```
+
+```rust
+use path_jail::guard::{FdJail, OpenOptions};
+use std::io::Read;
+
+// Pin the jail root as a file descriptor — renames of the root after this
+// point are invisible to the jail.
+let jail = FdJail::new("/var/uploads")?;
+
+// TOCTOU-safe open: one syscall, kernel-enforced containment
+let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
+let mut buf = Vec::new();
+jf.read_to_end(&mut buf)?;
+
+// Every open captures an Attestation with inode, device, nlink, and timestamp
+let att = jf.attestation();
+assert!(att.toctou_safe);            // true on Linux 5.6+
+assert!(att.signature.is_none());    // None until Ed25519 key is configured
+
+// Detect hard links (data exfiltration vector)
+if jf.has_hard_links() {
+    return Err("hard link policy violation");
+}
+
+// Create a new file — fails if it already exists
+let mut out = jail.create("output.bin")?;
+out.write_all(b"processed")?;
+```
+
+**On macOS/BSD:** falls back to an `O_NOFOLLOW`-based open (same protection as `secure-open`). `attestation().toctou_safe` will be `false`.
+
+**Blocked by `openat2`:**
+- Symlink escapes (`/etc` link inside jail) → `JailError::Escape`
+- `..` traversal → `JailError::Escape`
+- `/proc/self/root` and other magic links → `JailError::MagicLink`
+- Symlinks when `no_symlinks(true)` → `JailError::SymlinkRejected`
+
+**Returns `JailError::UnsupportedKernel`** on Linux kernels older than 5.6. Zero additional dependencies — raw syscall, no libc.
 
 ## Alternatives
 
 | | path_jail | strict-path | cap-std |
 |-|-----------|-------------|---------|
-| Approach | Path validation | Type-safe path system | File descriptors |
-| Returns | `PathBuf` / `JailedPath` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
+| Approach | Path validation + guard | Type-safe path system | File descriptors |
+| Returns | `PathBuf` / `JailedPath` / `JailFile` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
 | Dependencies | 0 | ~5 | ~10 |
-| TOCTOU-safe | With `secure-open`* | No | Yes |
-| Best for | Simple file sandboxing | Complex type-safe paths | Kernel-enforced security |
+| TOCTOU-safe | `guard` (Linux 5.6+, kernel-enforced) / `secure-open` (final component, all Unix) | No | Yes |
+| Best for | File sandboxing with optional kernel enforcement | Complex type-safe paths | Full capability-based security |
 
 - [`strict-path`](https://crates.io/crates/strict-path) - More comprehensive, uses marker types for compile-time guarantees
-- [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but different API than `std::fs`
+- [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but replaces `std::fs` entirely
 
-*With `secure-open`: Safe against remote attackers and symlink attacks on the final path component. Not safe against local attackers who can swap intermediate directories. See [TOCTOU Race Conditions](#toctou-race-conditions).
+*`guard` on Linux 5.6+: the validate-and-open is a single `openat2` syscall — truly atomic, no race window. On macOS/BSD the same API falls back to `O_NOFOLLOW` (final component only).*
 
 ## Thread Safety
 
@@ -506,11 +563,13 @@ std::thread::spawn(move || {
 
 ## MSRV
 
-Minimum Supported Rust Version: **1.80**
+Minimum Supported Rust Version: **1.85**
 
-This crate tracks recent stable Rust. We use `LazyLock` for ergonomic static initialization in examples.
+This crate tracks recent stable Rust. The MSRV is bumped to 1.85 to accommodate transitive dev-dependencies that require edition 2024.
 
 ## Development
+
+This crate is maintained by [Tenuo](https://tenuo.ai). Contributions are welcome!
 
 ```bash
 git clone https://github.com/tenuo-ai/path_jail.git
