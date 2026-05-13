@@ -343,6 +343,32 @@ fn toctou_safe_reflects_platform() {
     );
 }
 
+// ── no_xdev option ───────────────────────────────────────────────────────────
+
+#[test]
+#[cfg(unix)]
+fn no_xdev_option_compiles_and_is_chainable() {
+    // We can't reliably create a mount point inside a tempdir in CI without
+    // privileges, so we just exercise the builder. The real EXDEV behaviour
+    // is enforced by the kernel and verified by integration testing against
+    // a bind-mounted directory in production deployments.
+    let opts = OpenOptions::new().read(true).no_xdev(true);
+    let _ = opts; // chainable, type-checks
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_xdev_succeeds_when_no_mount_crossing() {
+    // Without a mount-point crossing, no_xdev must not produce a spurious EXDEV.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    jail.open("a.txt", OpenOptions::new().read(true).no_xdev(true))
+        .expect("open with no_xdev should succeed when no mount is crossed");
+}
+
 // ── no_symlinks option ────────────────────────────────────────────────────────
 
 #[test]

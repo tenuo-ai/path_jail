@@ -226,16 +226,16 @@ fn encode_path_field(buf: &mut Vec<u8>, path: &Path) {
 ///
 /// Mirrors the relevant subset of [`std::fs::OpenOptions`].
 ///
-/// # Mount-point containment note
+/// # Mount-point containment
 ///
-/// `RESOLVE_NO_XDEV` (block cross-device traversal) is intentionally **not**
-/// exposed. The spec's containment model is *directory-tree* containment, not
-/// *filesystem-volume* containment. Bind mounts and overlayfs layers that are
-/// mounted inside the jail root are accessible by design — they are part of the
-/// logical directory tree as seen by the kernel. If your security policy
-/// requires strict filesystem-level containment (e.g., no bind-mount escapes
-/// in a container runtime), add `RESOLVE_NO_XDEV` to the `resolve` field of
-/// the `OpenHow` struct used internally, or open a feature request.
+/// By default the kernel allows traversal across mount points inside the jail
+/// root (bind mounts, overlayfs layers, etc. that have been mounted into the
+/// jail directory tree are reachable). If your threat model requires strict
+/// filesystem-volume containment — e.g., to defend against a privileged process
+/// bind-mounting external content into the jail — opt in via
+/// [`no_xdev`](Self::no_xdev). On Linux this maps to `RESOLVE_NO_XDEV`; on the
+/// macOS/BSD fallback it is a no-op (the fallback has no equivalent
+/// kernel-enforced flag).
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     pub(crate) read: bool,
@@ -245,6 +245,7 @@ pub struct OpenOptions {
     pub(crate) create: bool,
     pub(crate) create_new: bool,
     pub(crate) no_symlinks: bool,
+    pub(crate) no_xdev: bool,
 }
 
 impl OpenOptions {
@@ -285,6 +286,20 @@ impl OpenOptions {
         self.no_symlinks = v;
         self
     }
+
+    /// Block traversal across mount points (Linux: `RESOLVE_NO_XDEV`).
+    ///
+    /// When enabled, `openat2` returns `EXDEV` (mapped to [`JailError::Escape`])
+    /// if any path component crosses a mount point. Use this to defend against
+    /// bind-mount escapes when an attacker may have mounted external content
+    /// inside the jail directory.
+    ///
+    /// On the macOS/BSD fallback this is a no-op — the fallback has no
+    /// equivalent flag and cannot enforce mount-point containment.
+    pub fn no_xdev(mut self, v: bool) -> Self {
+        self.no_xdev = v;
+        self
+    }
 }
 
 // ── Linux implementation ──────────────────────────────────────────────────────
@@ -294,9 +309,10 @@ mod linux_impl {
     use super::*;
     use crate::openat2::{
         openat2, Errno, OpenHow, O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY,
-        RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
+        RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
     };
     use std::ffi::CString;
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
     /// Implementation of [`FdJail::open`] on Linux using `openat2`.
@@ -344,6 +360,9 @@ mod linux_impl {
         if opts.no_symlinks {
             resolve |= RESOLVE_NO_SYMLINKS;
         }
+        if opts.no_xdev {
+            resolve |= RESOLVE_NO_XDEV;
+        }
 
         let how = OpenHow {
             flags,
@@ -354,17 +373,19 @@ mod linux_impl {
         let owned_fd = openat2(dirfd.as_raw_fd(), &cpath, &how)
             .map_err(|e| map_errno_to_jail_error(e, rel_path))?;
 
-        // fstat the opened fd for attestation
-        let file_stat = fstat(owned_fd.as_raw_fd()).map_err(JailError::Io)?;
+        // Read attestation fields via File::metadata — uses std's portable stat
+        // wrapper and avoids arch-specific struct stat layouts. The fd ownership
+        // moves into File so it closes when the JailFile drops.
         let file: File = unsafe { File::from_raw_fd(owned_fd.into_raw_fd()) };
+        let meta = file.metadata().map_err(JailError::Io)?;
 
         let attestation = Attestation {
             jail_root: jail_root.to_path_buf(),
             opened_path: rel_path.to_path_buf(),
             root_inode,
-            file_inode: file_stat.ino,
-            device: file_stat.dev,
-            nlink: file_stat.nlink,
+            file_inode: meta.ino(),
+            device: meta.dev(),
+            nlink: meta.nlink(),
             toctou_safe: true,
             opened_at: SystemTime::now(),
             signature: None,
@@ -381,63 +402,6 @@ mod linux_impl {
                 JailError::MagicLink { requested: path.to_path_buf() },
             _ => JailError::Io(e.into()),
         }
-    }
-
-    // ── stat(2) without libc ───────────────────────────────────────────────────
-
-    pub(crate) struct StatResult {
-        pub dev: u64,
-        pub ino: u64,
-        pub nlink: u64,
-    }
-
-    /// `fstat(2)` via raw syscall — avoids libc.
-    pub(crate) fn fstat(fd: i32) -> std::io::Result<StatResult> {
-        // stat64 layout (x86-64 / aarch64)
-        #[repr(C)]
-        struct Stat64 {
-            st_dev: u64,
-            st_ino: u64,
-            st_nlink: u64,
-            st_mode: u32,
-            st_uid: u32,
-            st_gid: u32,
-            _pad0: u32,
-            st_rdev: u64,
-            st_size: i64,
-            st_blksize: i64,
-            st_blocks: i64,
-            st_atime: i64,
-            st_atime_ns: i64,
-            st_mtime: i64,
-            st_mtime_ns: i64,
-            st_ctime: i64,
-            st_ctime_ns: i64,
-            _unused: [i64; 3],
-        }
-
-        let mut stat = std::mem::MaybeUninit::<Stat64>::zeroed();
-        let ret: i64;
-        unsafe {
-            std::arch::asm!(
-                "syscall",
-                inlateout("rax") 5i64 /* SYS_fstat */ => ret,
-                in("rdi") fd,
-                in("rsi") stat.as_mut_ptr(),
-                out("rcx") _,
-                out("r11") _,
-                options(nostack),
-            );
-        }
-        if ret < 0 {
-            return Err(std::io::Error::from_raw_os_error(-ret as i32));
-        }
-        let s = unsafe { stat.assume_init() };
-        Ok(StatResult {
-            dev: s.st_dev,
-            ino: s.st_ino,
-            nlink: s.st_nlink,
-        })
     }
 }
 
@@ -557,8 +521,8 @@ impl FdJail {
 
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            use std::os::unix::io::{AsRawFd, FromRawFd};
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            use std::os::unix::io::FromRawFd;
 
             // Check kernel version first for a friendly error message.
             if let Some(kv) = openat2_kernel_version() {
@@ -582,9 +546,7 @@ impl FdJail {
                 .open(&root)
                 .map_err(JailError::Io)?;
 
-            // SAFETY: dir_file is open and valid; we immediately wrap it.
-            let raw_fd = dir_file.as_raw_fd();
-            let stat = linux_impl::fstat(raw_fd).map_err(JailError::Io)?;
+            let root_inode = dir_file.metadata().map_err(JailError::Io)?.ino();
             // Transfer ownership into OwnedFd (File will not close it).
             let dirfd = unsafe {
                 std::os::unix::io::OwnedFd::from_raw_fd(std::os::unix::io::IntoRawFd::into_raw_fd(
@@ -593,7 +555,7 @@ impl FdJail {
             };
             return Ok(FdJail {
                 root,
-                root_inode: stat.ino,
+                root_inode,
                 dirfd,
             });
         }
