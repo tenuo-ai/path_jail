@@ -32,6 +32,15 @@ pub enum JailError {
 
     /// A `/proc/self/fd`-style magic link was detected (`RESOLVE_NO_MAGICLINKS`).
     /// These links can escape the jail regardless of `RESOLVE_BENEATH`.
+    ///
+    /// # Currently unreachable
+    ///
+    /// The Linux kernel returns the same errno (`ELOOP`) for both
+    /// `RESOLVE_NO_MAGICLINKS` and `RESOLVE_NO_SYMLINKS` rejections, and
+    /// userspace cannot tell them apart. As of v0.5, magic-link rejections
+    /// surface as [`Self::SymlinkRejected`] rather than this variant. The
+    /// variant is preserved (and not yet deprecated) so callers can match on
+    /// it if a future kernel ABI separates the two errnos.
     #[cfg(feature = "guard")]
     MagicLink { requested: PathBuf },
 

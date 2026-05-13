@@ -28,6 +28,9 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - run: cargo build --verbose
       - run: cargo test --verbose
+      # Exercise every feature combo so guard/secure-open compile-only paths get linted.
+      - run: cargo build --all-features --verbose
+      - run: cargo test --all-features --verbose
 
   # Verify we compile on the Minimum Supported Rust Version
   msrv:
@@ -38,8 +41,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
         with:
           toolchain: "1.85"
-      - run: cargo build --verbose
-      - run: cargo test --verbose
+      - run: cargo build --all-features --verbose
+      - run: cargo test --all-features --verbose
 
   # Cross-compile and test on aarch64-linux (ARM servers, Raspberry Pi, etc.)
   cross:
@@ -67,7 +70,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
         with:
           components: clippy
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-features --all-targets -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest
@@ -83,5 +86,33 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
-      - run: cargo doc --no-deps
+      - run: cargo doc --all-features --no-deps
+
+  # Supply-chain check: advisories, licenses, dep bans, sources.
+  # Config lives in deny.toml.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: Run cargo-deny
+        run: cargo deny --all-features check
+
+  # Semver discipline: catch breaking changes between commits and the
+  # last-published version on crates.io. Runs on PRs only; main is allowed to
+  # bump major/minor explicitly.
+  semver-checks:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+      - name: Install cargo-semver-checks
+        run: cargo install --locked cargo-semver-checks
+      - name: Run cargo-semver-checks
+        run: cargo semver-checks check-release --all-features || true
+        # `|| true` for now: 0.4.0 is the first release with the guard surface
+        # so a baseline doesn't exist. Remove the suffix once a baseline ships.
 

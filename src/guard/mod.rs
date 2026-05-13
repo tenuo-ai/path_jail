@@ -5,5 +5,7 @@
 //! See the [crate-level documentation](crate) for a quick-start example.
 
 mod fd_jail;
+mod signing;
 
 pub use fd_jail::{Attestation, FdJail, JailFile, OpenOptions};
+pub use signing::{Signer, Verifier, VerifyError};

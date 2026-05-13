@@ -421,16 +421,18 @@ fn backslash_is_valid_filename_on_unix() {
 #[test]
 fn handles_control_characters() {
     let dir = tempdir().unwrap();
-    let jail = Jail::new(dir.path()).unwrap();
 
     // Control characters are technically valid in filenames on Unix
     // (except null and slash). This is a logging/display issue, not security.
     #[cfg(unix)]
     {
+        let jail = Jail::new(dir.path()).unwrap();
         // These should work (though they're ugly)
         let _ = jail.join("file\n.txt"); // Newline
         let _ = jail.join("file\t.txt"); // Tab
     }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 #[test]

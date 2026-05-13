@@ -11,18 +11,18 @@ use std::sync::OnceLock;
 
 // ── Architecture guard ────────────────────────────────────────────────────────
 
-// The inline-asm syscall shim is currently implemented for x86_64 only.
-// aarch64 and riscv64 use different register conventions (x8/x0-x5 and
-// a7/a0-a5 respectively) and need their own asm blocks. Narrow the supported
-// arch list to x86_64 until those are written, rather than silently producing
-// broken binaries on aarch64 CI runners.
-#[cfg(not(target_arch = "x86_64"))]
+// The inline-asm syscall shim is implemented for x86_64 and aarch64.
+// riscv64 uses a different register convention (a7/a0-a5) and is not yet
+// supported. Reject other architectures with a compile error rather than
+// silently producing broken binaries.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!(
-    "path_jail guard: only x86_64 Linux is currently supported for the raw-asm syscall path. \
-     aarch64/riscv64 support is planned. Track: https://github.com/tenuo-ai/path_jail/issues"
+    "path_jail guard: only x86_64 and aarch64 Linux are currently supported for the raw-asm syscall path. \
+     riscv64 support is planned. Track: https://github.com/tenuo-ai/path_jail/issues"
 );
 
-// SYS_openat2 — syscall number on x86_64 Linux (added in 5.6)
+// SYS_openat2 — syscall number on Linux (added in 5.6). Same value on x86_64
+// and aarch64 (the kernel keeps recent syscall numbers aligned across arches).
 const SYS_OPENAT2: i64 = 437;
 
 // ── open_how layout (linux/openat2.h) ────────────────────────────────────────
@@ -38,6 +38,7 @@ pub(crate) struct OpenHow {
 pub(crate) const RESOLVE_BENEATH: u64 = 0x08;
 pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+pub(crate) const RESOLVE_NO_XDEV: u64 = 0x01;
 
 // O_* flags (x86_64 Linux)
 pub(crate) const O_RDONLY: u64 = 0;
@@ -56,10 +57,6 @@ pub(crate) const O_CLOEXEC: u64 = 0o2000000;
 pub(crate) struct Errno(pub i32);
 
 impl Errno {
-    pub fn raw(self) -> i32 {
-        self.0
-    }
-
     // Errno constants we care about
     pub const EXDEV: Errno = Errno(18); // Cross-device link / escape attempt
     pub const ELOOP: Errno = Errno(40); // Too many symlinks / RESOLVE_NO_SYMLINKS
@@ -105,7 +102,7 @@ pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedF
     }
 }
 
-/// Raw 4-argument syscall shim for x86_64 Linux — avoids a libc dependency.
+/// Raw 4-argument syscall shim — avoids a libc dependency.
 ///
 /// # Safety
 ///
@@ -131,6 +128,36 @@ unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
         in("r10") a3,
         out("rcx") _,
         out("r11") _,
+        options(nostack),
+    );
+    ret
+}
+
+/// aarch64 Linux variant of [`syscall4`].
+///
+/// # Safety
+///
+/// Same contract as the x86_64 variant — caller supplies a valid syscall
+/// number and matching arguments.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let ret: i64;
+    // aarch64 Linux syscall ABI:
+    //   nr  → x8
+    //   a0  → x0  (inout so the return value lands back in x0)
+    //   a1  → x1
+    //   a2  → x2
+    //   a3  → x3
+    // The svc #0 instruction triggers the syscall; the kernel preserves
+    // all callee-saved registers, so no explicit clobbers are needed.
+    std::arch::asm!(
+        "svc #0",
+        in("x8") nr,
+        inout("x0") a0 => ret,
+        in("x1") a1,
+        in("x2") a2,
+        in("x3") a3,
         options(nostack),
     );
     ret

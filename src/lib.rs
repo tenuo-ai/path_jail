@@ -35,7 +35,7 @@
 //! ```
 //!
 //! ```no_run
-//! # #[cfg(feature = "guard")] {
+//! # #[cfg(all(feature = "guard", unix))] {
 //! use path_jail::guard::{FdJail, OpenOptions};
 //!
 //! let jail = FdJail::new("/var/uploads")?;
@@ -86,14 +86,19 @@ mod error;
 mod jail;
 mod jailed_path;
 
-#[cfg(feature = "secure-open")]
+// `secure-open` is Unix-only (uses `OpenOptionsExt::custom_flags`).
+// On Windows, enabling the feature is a no-op rather than a build error.
+#[cfg(all(feature = "secure-open", unix))]
 mod open;
 
-#[cfg(feature = "guard")]
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "guard", target_os = "linux"))]
 pub(crate) mod openat2;
 
-#[cfg(feature = "guard")]
+// `guard` is Unix-only — the implementation uses `OwnedFd`, `MetadataExt`,
+// `OpenOptionsExt::custom_flags`, etc., which only exist on `cfg(unix)`.
+// Windows is explicitly out of scope (see SECURITY.md). Compiling
+// `--features guard` on Windows is a no-op rather than a build failure.
+#[cfg(all(feature = "guard", unix))]
 pub mod guard;
 
 use std::path::{Path, PathBuf};
@@ -102,7 +107,7 @@ pub use error::JailError;
 pub use jail::Jail;
 pub use jailed_path::JailedPath;
 
-#[cfg(feature = "secure-open")]
+#[cfg(all(feature = "secure-open", unix))]
 pub use open::JailedFile;
 
 /// Validate a path in one shot.

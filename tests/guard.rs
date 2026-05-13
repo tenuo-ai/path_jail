@@ -3,12 +3,74 @@
 //! These tests correspond 1:1 to the spec's acceptance criteria table.
 //! Run with: `cargo test --features guard`
 
-#![cfg(feature = "guard")]
+#![cfg(all(feature = "guard", unix))]
 
-use path_jail::guard::{FdJail, OpenOptions};
+use path_jail::guard::{FdJail, OpenOptions, Signer, Verifier, VerifyError};
 use path_jail::JailError;
 use std::io::{Read, Write};
 use tempfile::tempdir;
+
+// ── Test signer/verifier ─────────────────────────────────────────────────────
+// A deterministic stand-in for an Ed25519 signer. NOT cryptographically secure;
+// only used to verify the trait surface end-to-end without pulling in a
+// crypto dep. Real callers wire up ed25519-dalek / ring / KMS.
+
+#[derive(Debug)]
+struct TestSigner {
+    key: [u8; 32],
+}
+
+#[derive(Debug)]
+struct TestVerifier {
+    key: [u8; 32],
+}
+
+#[derive(Debug)]
+struct BadSignature;
+impl std::fmt::Display for BadSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "test verifier rejected signature")
+    }
+}
+impl std::error::Error for BadSignature {}
+
+fn test_signature(key: &[u8; 32], msg: &[u8]) -> [u8; 64] {
+    // First 32 bytes: key XOR rolling-checksum of msg.
+    // Last 32 bytes: msg length, repeated.
+    let mut sig = [0u8; 64];
+    let mut acc: u8 = 0;
+    for (i, b) in msg.iter().enumerate() {
+        acc = acc.wrapping_add(*b).wrapping_add(i as u8);
+    }
+    for i in 0..32 {
+        sig[i] = key[i] ^ acc.wrapping_add(i as u8);
+    }
+    let len = msg.len() as u64;
+    let len_bytes = len.to_le_bytes();
+    for i in 0..32 {
+        sig[32 + i] = len_bytes[i % 8];
+    }
+    sig
+}
+
+impl Signer for TestSigner {
+    type Error = std::convert::Infallible;
+    fn sign(&self, msg: &[u8]) -> Result<[u8; 64], Self::Error> {
+        Ok(test_signature(&self.key, msg))
+    }
+}
+
+impl Verifier for TestVerifier {
+    type Error = BadSignature;
+    fn verify(&self, msg: &[u8], signature: &[u8; 64]) -> Result<(), Self::Error> {
+        let expected = test_signature(&self.key, msg);
+        if expected == *signature {
+            Ok(())
+        } else {
+            Err(BadSignature)
+        }
+    }
+}
 
 // ── Criterion 1 ──────────────────────────────────────────────────────────────
 // jail.open("../../etc/passwd") → JailError::Escape
@@ -107,10 +169,19 @@ fn ac3_magic_link_blocked() {
         .open("self/root/etc/passwd", OpenOptions::new().read(true))
         .unwrap_err();
 
-    // Either MagicLink (RESOLVE_NO_MAGICLINKS) or Escape (RESOLVE_BENEATH catches the root link)
+    // The kernel returns ELOOP for RESOLVE_NO_MAGICLINKS rejections, which
+    // we map to SymlinkRejected — userspace cannot distinguish a magic-link
+    // rejection from a regular symlink rejection (see JailError::MagicLink
+    // docs). Escape (EXDEV) is also acceptable if the kernel resolved
+    // /proc/self/root as a regular link before noticing the cross-mount.
     assert!(
-        matches!(err, JailError::MagicLink { .. } | JailError::Escape { .. }),
-        "expected MagicLink or Escape for /proc/self/root, got: {:?}",
+        matches!(
+            err,
+            JailError::MagicLink { .. }
+                | JailError::Escape { .. }
+                | JailError::SymlinkRejected { .. }
+        ),
+        "expected MagicLink, Escape, or SymlinkRejected for /proc/self/root, got: {:?}",
         err
     );
 }
@@ -206,16 +277,12 @@ fn ac5_content_bytes_deterministic() {
     );
 }
 
-// ── Criterion 6 (partial) ────────────────────────────────────────────────────
+// ── Criterion 6 ──────────────────────────────────────────────────────────────
 // Spec AC6: "Signed attestation verifies under configured key."
-// Ed25519 signing requires an external key and is future work (tracked separately).
-// This test covers the prerequisite: the wire format encodes fields correctly
-// and signature is None when no key is configured.
-// TODO(ac6): add signing verification once the Ed25519 feature is implemented.
 
 #[test]
 #[cfg(unix)]
-fn ac6_partial_attestation_wire_format_and_unsigned() {
+fn ac6_attestation_wire_format() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("data.bin");
     std::fs::write(&file, b"bytes").unwrap();
@@ -241,8 +308,101 @@ fn ac6_partial_attestation_wire_format_and_unsigned() {
     assert_eq!(path_len, path_bytes.len());
     assert_eq!(&cb[off + 4..off + 4 + path_len], path_bytes);
 
-    // Signature is None (no key configured — full AC6 is pending Ed25519 feature)
+    // Unsigned by default
     assert!(att.signature.is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn ac6_signed_attestation_verifies_under_configured_key() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("payload.bin");
+    std::fs::write(&file, b"x").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    let jf = jail
+        .open("payload.bin", OpenOptions::new().read(true))
+        .unwrap();
+
+    let key = [7u8; 32];
+    let signer = TestSigner { key };
+    let verifier = TestVerifier { key };
+
+    // Sign produces a signature populated attestation.
+    let signed = jf.sign_attestation(&signer).expect("signer infallible");
+    assert!(signed.signature.is_some());
+
+    // Verify under the same key succeeds.
+    signed
+        .verify(&verifier)
+        .expect("signature must verify under matching key");
+}
+
+#[test]
+#[cfg(unix)]
+fn ac6_signature_rejected_under_wrong_key() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("payload.bin");
+    std::fs::write(&file, b"x").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    let jf = jail
+        .open("payload.bin", OpenOptions::new().read(true))
+        .unwrap();
+
+    let signer = TestSigner { key: [1u8; 32] };
+    let wrong_verifier = TestVerifier { key: [2u8; 32] };
+
+    let signed = jf.sign_attestation(&signer).unwrap();
+    let err = signed
+        .verify(&wrong_verifier)
+        .expect_err("verification under a different key must fail");
+    assert!(matches!(err, VerifyError::Invalid(_)));
+}
+
+#[test]
+#[cfg(unix)]
+fn ac6_unsigned_attestation_verify_returns_notsigned() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("payload.bin");
+    std::fs::write(&file, b"x").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    let jf = jail
+        .open("payload.bin", OpenOptions::new().read(true))
+        .unwrap();
+
+    let verifier = TestVerifier { key: [0u8; 32] };
+    let err = jf
+        .attestation()
+        .verify(&verifier)
+        .expect_err("unsigned attestation must not verify");
+    assert!(matches!(err, VerifyError::NotSigned));
+}
+
+#[test]
+#[cfg(unix)]
+fn ac6_signature_rejected_on_tampered_field() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("payload.bin");
+    std::fs::write(&file, b"x").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    let jf = jail
+        .open("payload.bin", OpenOptions::new().read(true))
+        .unwrap();
+
+    let key = [42u8; 32];
+    let signer = TestSigner { key };
+    let verifier = TestVerifier { key };
+
+    let mut signed = jf.sign_attestation(&signer).unwrap();
+    // Tamper after signing.
+    signed.file_inode = signed.file_inode.wrapping_add(1);
+    let err = signed
+        .verify(&verifier)
+        .expect_err("tampered attestation must fail verification");
+    assert!(matches!(err, VerifyError::Invalid(_)));
 }
 
 // ── Criterion 7 ──────────────────────────────────────────────────────────────
@@ -341,6 +501,40 @@ fn toctou_safe_reflects_platform() {
         !jf.attestation().toctou_safe,
         "macOS/BSD fallback is not TOCTOU-safe"
     );
+}
+
+// ── no_xdev option ───────────────────────────────────────────────────────────
+
+// TODO(no_xdev): the test below only proves the builder type-checks. The
+// real EXDEV-on-mount-crossing assertion needs a bind mount, which requires
+// CAP_SYS_ADMIN and is not available in the default GitHub Actions runner.
+// Plan: add a separate workflow (e.g. .github/workflows/privileged-tests.yml)
+// that runs under `sudo unshare -m` or a privileged container and includes a
+// `#[ignore]`d test marked `#[cfg(target_os = "linux")]` that:
+//   1. mkdir jail/mnt && mkdir external
+//   2. mount --bind external jail/mnt
+//   3. assert FdJail::new(jail).open("mnt/foo", OpenOptions::new().read(true)
+//        .no_xdev(true)) returns JailError::Escape
+//   4. umount jail/mnt
+// Until that workflow exists, this builder test is the only signal we have.
+#[test]
+#[cfg(unix)]
+fn no_xdev_option_compiles_and_is_chainable() {
+    let opts = OpenOptions::new().read(true).no_xdev(true);
+    let _ = opts;
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_xdev_succeeds_when_no_mount_crossing() {
+    // Without a mount-point crossing, no_xdev must not produce a spurious EXDEV.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    jail.open("a.txt", OpenOptions::new().read(true).no_xdev(true))
+        .expect("open with no_xdev should succeed when no mount is crossed");
 }
 
 // ── no_symlinks option ────────────────────────────────────────────────────────
