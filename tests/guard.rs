@@ -496,15 +496,23 @@ fn toctou_safe_reflects_platform() {
 
 // ── no_xdev option ───────────────────────────────────────────────────────────
 
+// TODO(no_xdev): the test below only proves the builder type-checks. The
+// real EXDEV-on-mount-crossing assertion needs a bind mount, which requires
+// CAP_SYS_ADMIN and is not available in the default GitHub Actions runner.
+// Plan: add a separate workflow (e.g. .github/workflows/privileged-tests.yml)
+// that runs under `sudo unshare -m` or a privileged container and includes a
+// `#[ignore]`d test marked `#[cfg(target_os = "linux")]` that:
+//   1. mkdir jail/mnt && mkdir external
+//   2. mount --bind external jail/mnt
+//   3. assert FdJail::new(jail).open("mnt/foo", OpenOptions::new().read(true)
+//        .no_xdev(true)) returns JailError::Escape
+//   4. umount jail/mnt
+// Until that workflow exists, this builder test is the only signal we have.
 #[test]
 #[cfg(unix)]
 fn no_xdev_option_compiles_and_is_chainable() {
-    // We can't reliably create a mount point inside a tempdir in CI without
-    // privileges, so we just exercise the builder. The real EXDEV behaviour
-    // is enforced by the kernel and verified by integration testing against
-    // a bind-mounted directory in production deployments.
     let opts = OpenOptions::new().read(true).no_xdev(true);
-    let _ = opts; // chainable, type-checks
+    let _ = opts;
 }
 
 #[test]
