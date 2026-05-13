@@ -35,7 +35,7 @@
 //! ```
 //!
 //! ```no_run
-//! # #[cfg(feature = "guard")] {
+//! # #[cfg(all(feature = "guard", unix))] {
 //! use path_jail::guard::{FdJail, OpenOptions};
 //!
 //! let jail = FdJail::new("/var/uploads")?;
