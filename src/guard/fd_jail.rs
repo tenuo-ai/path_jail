@@ -73,6 +73,24 @@ impl JailFile {
     pub fn has_hard_links(&self) -> bool {
         self.attestation.nlink > 1
     }
+
+    /// Signs this file's attestation with the given signer and returns a
+    /// new [`Attestation`] with `signature` populated.
+    ///
+    /// The signature covers [`Attestation::signing_bytes`] — the canonical
+    /// fixed-layout encoding of every attestation field including `opened_at`.
+    ///
+    /// path_jail does not vendor a signing implementation; provide one by
+    /// implementing the [`Signer`](crate::guard::Signer) trait. See the
+    /// [`signing`](crate::guard) module docs for an `ed25519-dalek` example.
+    pub fn sign_attestation<S: crate::guard::Signer>(
+        &self,
+        signer: &S,
+    ) -> Result<Attestation, S::Error> {
+        let mut att = self.attestation.clone();
+        att.signature = Some(signer.sign(&att.signing_bytes())?);
+        Ok(att)
+    }
 }
 
 impl std::fmt::Debug for JailFile {
@@ -128,10 +146,15 @@ impl std::io::Seek for JailFile {
 ///
 /// # Signing
 ///
-/// Attestations can be signed with an Ed25519 key by calling
-/// `sign_attestation` (see future Ed25519 signing support). Unsigned attestations are valid for logging
-/// and debugging but **MUST NOT** be accepted by the Tenuo enforcement point as
-/// proof of guard execution.
+/// Sign an attestation by calling [`JailFile::sign_attestation`] with any type
+/// that implements the [`Signer`](crate::guard::Signer) trait. The library does
+/// not vendor a crypto implementation — bring your own (`ed25519-dalek`,
+/// `ring`, HSM, KMS, etc.). See the [`signing`](crate::guard) module for
+/// examples.
+///
+/// Verify a received attestation with [`Attestation::verify`]. Unsigned
+/// attestations are valid for logging and debugging but **MUST NOT** be
+/// accepted by the Tenuo enforcement point as proof of guard execution.
 ///
 /// # Determinism
 ///
@@ -198,9 +221,14 @@ impl Attestation {
 
     /// Returns the full signing wire format (content bytes + `opened_at` nanos).
     ///
-    /// This is the byte slice that the Ed25519 signature covers. It is
-    /// intentionally not pub — callers will use `JailFile::sign_attestation` (future work).
-    #[allow(dead_code)] // Used by future Ed25519 signing integration
+    /// This is the exact byte slice that a [`Signer`](crate::guard::Signer)
+    /// produces a signature over, and that a
+    /// [`Verifier`](crate::guard::Verifier) must replay during verification.
+    /// Exposed publicly so enforcement points outside this crate can perform
+    /// their own verification without going through [`Attestation::verify`].
+    ///
+    /// Format: [`content_bytes`](Self::content_bytes) followed by
+    /// `opened_at` (nanoseconds since UNIX_EPOCH) as `u64 LE`.
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut buf = self.content_bytes();
         let nanos = self
@@ -210,6 +238,27 @@ impl Attestation {
             .as_nanos() as u64;
         buf.extend_from_slice(&nanos.to_le_bytes());
         buf
+    }
+
+    /// Verifies this attestation's signature with the given verifier.
+    ///
+    /// Returns `Ok(())` only if a signature is present **and** the verifier
+    /// accepts it. Unsigned attestations return
+    /// [`VerifyError::NotSigned`](crate::guard::VerifyError::NotSigned);
+    /// signed-but-invalid attestations return
+    /// [`VerifyError::Invalid`](crate::guard::VerifyError::Invalid) wrapping
+    /// the verifier's own error.
+    ///
+    /// Enforcement points should call this **before** trusting any other
+    /// attestation field — see the type-level docs for the rationale.
+    pub fn verify<V: crate::guard::Verifier>(
+        &self,
+        verifier: &V,
+    ) -> Result<(), crate::guard::VerifyError<V::Error>> {
+        let sig = self.signature.ok_or(crate::guard::VerifyError::NotSigned)?;
+        verifier
+            .verify(&self.signing_bytes(), &sig)
+            .map_err(crate::guard::VerifyError::Invalid)
     }
 }
 

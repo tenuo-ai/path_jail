@@ -14,21 +14,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `FdJail::open()` / `FdJail::create()` perform a single TOCTOU-safe syscall on Linux
   - `FdJail::check()` validates a path without opening (logging/display only — must not be used as the basis for a subsequent open)
   - `Attestation` records `jail_root`, `opened_path`, `root_inode`, `file_inode`, `device`, `nlink`, `toctou_safe`, `opened_at`
-  - `Attestation::content_bytes()` for deterministic comparison; `signing_bytes()` for future Ed25519 signing
-  - `OpenOptions` with `read`/`write`/`append`/`truncate`/`create`/`create_new`/`no_symlinks`
+  - `Attestation::content_bytes()` for deterministic comparison; `Attestation::signing_bytes()` now public for external verifiers
+  - `OpenOptions` with `read`/`write`/`append`/`truncate`/`create`/`create_new`/`no_symlinks`/`no_xdev`
   - `JailFile::has_hard_links()` exposes hard-link policy; library does not enforce, caller decides
   - macOS/BSD fallback via `O_NOFOLLOW`; `Attestation::toctou_safe` is `false` on the fallback path
+- **Pluggable attestation signing** (`guard::Signer`, `guard::Verifier`, `guard::VerifyError`)
+  - `JailFile::sign_attestation(&signer)` returns a signed `Attestation`
+  - `Attestation::verify(&verifier)` checks the signature on the enforcement side
+  - Zero vendored crypto — bring your own (`ed25519-dalek`, `ring`, HSM, KMS, etc.)
+- **`OpenOptions::no_xdev`** — opt in to `RESOLVE_NO_XDEV` for mount-point containment (defends against bind-mount escapes)
+- **aarch64 Linux support** for the `guard` feature (alongside x86_64); riscv64 is still gated by `compile_error!`
 - New error variants (guarded by `guard` feature): `Escape`, `SymlinkRejected`, `MagicLink`, `UnsupportedKernel`, `InvalidJailRoot`
 
 ### Changed
 
 - **Breaking**: MSRV bumped from 1.80 to 1.85 to accommodate transitive dev-dependencies that require Cargo edition 2024
+- Attestation fields are now read via `File::metadata()` instead of an inline-asm `fstat` syscall (portable across architectures, eliminates the arch-specific struct-stat layout problem)
 - Crate package now `exclude`s `docs/`, `.claude/`, `.github/`, `tests/`
 
 ### Notes
 
 - The `guard` feature uses only `std` and raw syscalls — zero new runtime dependencies
-- `guard` is currently x86_64 Linux only for the raw-asm `openat2` path; aarch64/riscv64 support is planned
+- `guard` supports x86_64 and aarch64 Linux for the raw-asm `openat2` path; riscv64 support is planned
 
 ## [0.3.0] - 2026-01-05
 
