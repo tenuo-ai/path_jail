@@ -413,9 +413,13 @@ mod linux_impl {
             resolve |= RESOLVE_NO_XDEV;
         }
 
+        // Per openat2(2): `mode` MUST be 0 unless O_CREAT or O_TMPFILE is set,
+        // otherwise the kernel returns EINVAL. We do not use O_TMPFILE.
+        let mode: u64 = if flags & O_CREAT != 0 { 0o666 } else { 0 };
+
         let how = OpenHow {
             flags,
-            mode: 0o666,
+            mode,
             resolve,
         };
 
@@ -602,11 +606,11 @@ impl FdJail {
                     dir_file,
                 ))
             };
-            return Ok(FdJail {
+            Ok(FdJail {
                 root,
                 root_inode,
                 dirfd,
-            });
+            })
         }
 
         #[cfg(not(target_os = "linux"))]

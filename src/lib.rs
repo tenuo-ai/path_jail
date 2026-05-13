@@ -89,11 +89,14 @@ mod jailed_path;
 #[cfg(feature = "secure-open")]
 mod open;
 
-#[cfg(feature = "guard")]
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "guard", target_os = "linux"))]
 pub(crate) mod openat2;
 
-#[cfg(feature = "guard")]
+// `guard` is Unix-only — the implementation uses `OwnedFd`, `MetadataExt`,
+// `OpenOptionsExt::custom_flags`, etc., which only exist on `cfg(unix)`.
+// Windows is explicitly out of scope (see SECURITY.md). Compiling
+// `--features guard` on Windows is a no-op rather than a build failure.
+#[cfg(all(feature = "guard", unix))]
 pub mod guard;
 
 use std::path::{Path, PathBuf};
