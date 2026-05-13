@@ -57,10 +57,6 @@ pub(crate) const O_CLOEXEC: u64 = 0o2000000;
 pub(crate) struct Errno(pub i32);
 
 impl Errno {
-    pub fn raw(self) -> i32 {
-        self.0
-    }
-
     // Errno constants we care about
     pub const EXDEV: Errno = Errno(18); // Cross-device link / escape attempt
     pub const ELOOP: Errno = Errno(40); // Too many symlinks / RESOLVE_NO_SYMLINKS
