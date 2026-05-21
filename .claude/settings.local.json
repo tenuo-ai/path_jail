@@ -7,7 +7,29 @@
       "Bash(cargo check *)",
       "Bash(cargo test *)",
       "Bash(cargo clippy *)",
-      "Bash(cargo fmt *)"
+      "Bash(cargo fmt *)",
+      "Bash(curl -sI https://gh.io/billing-api-updates-org)",
+      "Bash(curl -sI https://www.githubstatus.com/api/v2/components.json)",
+      "Bash(curl -s https://www.githubstatus.com/api/v2/components.json)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(c['name'],'->',c['status']\\) for c in d['components'] if 'action' in c['name'].lower\\(\\) or 'runner' in c['name'].lower\\(\\)]\")",
+      "Bash(gh auth *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c ' *)",
+      "Bash(gh workflow *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\([{'run_number':a.get\\('run_number'\\),'attempt':a.get\\('run_attempt'\\),'created_at':a.get\\('created_at'\\),'conclusion':a.get\\('conclusion'\\)} for a in \\(d.get\\('workflow_runs'\\) if isinstance\\(d,dict\\) else d\\)], indent=2\\)\\)\")",
+      "Bash(curl -sH 'Authorization: token __CMDSUB_OUTPUT__' -H 'Accept: application/vnd.github+json' https://api.github.com/repos/tenuo-ai/path_jail/check-runs/75724571128)",
+      "Bash(cargo build *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git ls-remote *)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(git rebase *)",
+      "Bash(cargo tree *)",
+      "Bash(git commit -m 'fix\\(guard\\): drop unused Errno::raw\\(\\) helper *)",
+      "Bash(git commit -m 'fix\\(tests\\): gate Unix-only test files for Windows --all-features *)",
+      "Bash(git commit -m 'fix\\(docs\\): gate guard quick-start doctest on cfg\\(unix\\) *)"
     ]
   }
 }

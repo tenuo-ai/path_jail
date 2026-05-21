@@ -5,37 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-05-13
+## [0.4.0] - 2026-05-21
 
 ### Added
 
-- **`guard` feature** (formerly `fd-first`): kernel-enforced TOCTOU-safe file access via `openat2(RESOLVE_BENEATH)` on Linux 5.6+
-  - `guard::FdJail` pins a directory fd at construction; root renames after `FdJail::new` are ignored
-  - `FdJail::open()` / `FdJail::create()` perform a single TOCTOU-safe syscall on Linux
-  - `FdJail::check()` validates a path without opening (logging/display only — must not be used as the basis for a subsequent open)
-  - `Attestation` records `jail_root`, `opened_path`, `root_inode`, `file_inode`, `device`, `nlink`, `toctou_safe`, `opened_at`
-  - `Attestation::content_bytes()` for deterministic comparison; `Attestation::signing_bytes()` now public for external verifiers
-  - `OpenOptions` with `read`/`write`/`append`/`truncate`/`create`/`create_new`/`no_symlinks`/`no_xdev`
-  - `JailFile::has_hard_links()` exposes hard-link policy; library does not enforce, caller decides
-  - macOS/BSD fallback via `O_NOFOLLOW`; `Attestation::toctou_safe` is `false` on the fallback path
-- **Pluggable attestation signing** (`guard::Signer`, `guard::Verifier`, `guard::VerifyError`)
-  - `JailFile::sign_attestation(&signer)` returns a signed `Attestation`
-  - `Attestation::verify(&verifier)` checks the signature on the enforcement side
-  - Zero vendored crypto — bring your own (`ed25519-dalek`, `ring`, HSM, KMS, etc.)
-- **`OpenOptions::no_xdev`** — opt in to `RESOLVE_NO_XDEV` for mount-point containment (defends against bind-mount escapes)
-- **aarch64 Linux support** for the `guard` feature (alongside x86_64); riscv64 is still gated by `compile_error!`
-- New error variants (guarded by `guard` feature): `Escape`, `SymlinkRejected`, `MagicLink`, `UnsupportedKernel`, `InvalidJailRoot`
+- **`guard` feature** (Linux 5.6+ / macOS-BSD fallback): kernel-enforced TOCTOU-safe file access
+  - `FdJail::new()` — pins the jail root as a live directory fd at construction time; subsequent opens cannot be raced by renames of the root
+  - `FdJail::open()` — single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall on Linux 5.6+; `O_NOFOLLOW` fallback on macOS/BSD (`attestation().toctou_safe` will be `false` on the fallback path)
+  - `FdJail::create()` — `O_CREAT | O_EXCL` atomic creation
+  - `FdJail::check_path()` — validate a path without opening (for logging/display only; re-opening reintroduces TOCTOU)
+  - `OpenOptions` — mirrors the relevant subset of `std::fs::OpenOptions`; adds `no_symlinks` (`RESOLVE_NO_SYMLINKS`) and `no_xdev` (`RESOLVE_NO_XDEV`)
+  - `JailFile` — wraps the opened `File` alongside an `Attestation` snapshot; implements `Read`, `Write`, `Seek`, `Deref<Target=File>`
+  - `GuardedFile` — wraps the opened `File` alongside an `Attestation` snapshot; implements `Read`, `Write`, `Seek`, `Deref<Target=File>`, `AsFd`, `AsRawFd` (Unix)
+  - `GuardedFile::has_hard_links()` — detects hard links (data-exfiltration vector) via `nlink` from `fstat`
+  - `Attestation` (`#[non_exhaustive]`) — records `jail_root`, `opened_path`, `root_inode`, `file_inode`, `device`, `nlink`, `toctou_safe`, `opened_at`, and an optional 64-byte signature
+  - `Attestation::content_bytes()` — canonical serialization of all fields except `opened_at` and `signature` (stable for content-equality checks)
+  - `Attestation::signing_bytes()` — `content_bytes` + `opened_at` nanos; the exact bytes a `Signer` signs and a `Verifier` replays
+  - `Attestation::verify()` — signature verification against a `Verifier`
+  - `GuardedFile::sign_attestation()` — returns a new `Attestation` with `signature` populated
+  - `Signer` trait — pluggable 64-byte signature production (`ed25519-dalek`, `ring`, HSM, KMS, etc.)
+  - `Verifier` trait — pluggable signature verification
+  - `VerifyError<E>` — distinguishes `NotSigned` from `Invalid(E)`
+
+- **aarch64 Linux support** — cross-compilation and tests verified on `aarch64-unknown-linux-gnu` and `armv7-unknown-linux-gnueabihf`
+
+- **`guard` feature — architecture support expanded**: Linux on `riscv64`, `s390x`, `loongarch64`, and all other architectures without a raw `openat2` syscall shim now fall through to the `O_NOFOLLOW` fallback (same as macOS/BSD) instead of emitting a compile error. `attestation().toctou_safe` will be `false` on these platforms.
+
+- New `JailError` variants (all `#[cfg(feature = "guard")]`):
+  - `Escape { requested }` — `openat2` returned `EXDEV`; covers symlink escapes, `..` traversal, and absolute injection
+  - `SymlinkRejected { requested }` — `openat2` returned `ELOOP`; covers symlink loops and `no_symlinks` policy rejections; also surfaces magic-link rejections because the kernel maps both to `ELOOP`
+  - `MagicLink { requested }` — reserved for a future kernel ABI that separates magic-link errno; currently unreachable (see deprecation note)
+  - `UnsupportedKernel { version }` — `openat2` not available on kernel < 5.6 (`#[cfg(target_os = "linux")]`)
+  - `InvalidJailRoot { path, source }` — invalid root in the guard API
 
 ### Changed
 
-- **Breaking**: MSRV bumped from 1.80 to 1.85 to accommodate transitive dev-dependencies that require Cargo edition 2024
-- Attestation fields are now read via `File::metadata()` instead of an inline-asm `fstat` syscall (portable across architectures, eliminates the arch-specific struct-stat layout problem)
-- Crate package now `exclude`s `docs/`, `.claude/`, `.github/`, `tests/`
+- MSRV bumped from 1.80 to **1.85** (accommodates edition-2024 transitive dev-dependencies)
+- `guard` feature flag replaces the earlier `fd-first` name (internal rename; no API was previously published)
+- **`JailError::InvalidRoot`** is now a struct variant `{ path: PathBuf, source: Option<std::io::Error> }` instead of a tuple variant `(PathBuf)`. The `source` field is `Some` when an I/O error was the proximate cause (e.g., `FdJail::new` failing to open the directory) and `None` for structural rejections (e.g., path is `/`). `JailError::InvalidJailRoot` (guard-only) is removed; `InvalidRoot` now covers both APIs.
+- **`guard::JailFile`** renamed to **`guard::GuardedFile`** to distinguish it clearly from `crate::JailedFile` (the `secure-open` type).
+- **`FdJail::check`** renamed to **`FdJail::check_path`** to make the "no fd held, for display only" semantics visible at the call site.
+- `KernelVersion` is now `#[non_exhaustive]`.
+- `secure-open` on an unknown Unix platform now produces a `compile_error!` instead of silently setting `O_NOFOLLOW = 0` (which would have followed symlinks without any error).
+- `FdJail::new` canonicalize failure now returns `JailError::InvalidRoot` (with `source: Some(io_error)`) instead of `JailError::Io`.
 
-### Notes
+### Deprecated
 
-- The `guard` feature uses only `std` and raw syscalls — zero new runtime dependencies
-- `guard` supports x86_64 and aarch64 Linux for the raw-asm `openat2` path; riscv64 support is planned
+- `JailError::MagicLink` — the Linux kernel currently returns `ELOOP` for both magic-link and symlink rejections, making this variant unreachable. Match on `SymlinkRejected` instead. The variant is preserved so callers are not broken if a future kernel release introduces a distinct errno.
+
+## [0.3.1] - 2026-01-06
+
+### Fixed
+
+- Formatting issues (rustfmt)
 
 ## [0.3.0] - 2026-01-05
 

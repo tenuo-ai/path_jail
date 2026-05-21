@@ -19,11 +19,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-// Linux imports — gated so macOS builds don't see unused-import warnings.
-#[cfg(target_os = "linux")]
+// "openat2-capable" platforms: Linux on x86_64 or aarch64.
+// All other platforms (macOS, BSD, Windows, and Linux on other arches such as
+// riscv64/s390x/loongarch64) use the O_NOFOLLOW fallback with toctou_safe=false.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MIN_OPENAT2_KERNEL};
-
-// macOS/BSD: fallback_impl is self-contained.
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -33,12 +36,15 @@ use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MI
 /// time. On Linux 5.6+ the open is performed by a single `openat2` syscall and
 /// is therefore TOCTOU-safe by construction; on other platforms a fallback path
 /// is used and `attestation().toctou_safe` will be `false`.
-pub struct JailFile {
+///
+/// See [`JailedFile`](crate::JailedFile) for the lighter `secure-open` variant
+/// that uses `O_NOFOLLOW` without an `Attestation`.
+pub struct GuardedFile {
     pub(crate) file: File,
     pub(crate) attestation: Attestation,
 }
 
-impl JailFile {
+impl GuardedFile {
     /// Returns a reference to the underlying [`File`].
     pub fn file(&self) -> &File {
         &self.file
@@ -93,34 +99,34 @@ impl JailFile {
     }
 }
 
-impl std::fmt::Debug for JailFile {
+impl std::fmt::Debug for GuardedFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JailFile")
+        f.debug_struct("GuardedFile")
             .field("attestation", &self.attestation)
             .finish_non_exhaustive()
     }
 }
 
-impl std::ops::Deref for JailFile {
+impl std::ops::Deref for GuardedFile {
     type Target = File;
     fn deref(&self) -> &File {
         &self.file
     }
 }
 
-impl std::ops::DerefMut for JailFile {
+impl std::ops::DerefMut for GuardedFile {
     fn deref_mut(&mut self) -> &mut File {
         &mut self.file
     }
 }
 
-impl std::io::Read for JailFile {
+impl std::io::Read for GuardedFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.file.read(buf)
     }
 }
 
-impl std::io::Write for JailFile {
+impl std::io::Write for GuardedFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.file.write(buf)
     }
@@ -129,15 +135,33 @@ impl std::io::Write for JailFile {
     }
 }
 
-impl std::io::Seek for JailFile {
+impl std::io::Seek for GuardedFile {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.file.seek(pos)
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsFd for GuardedFile {
+    fn as_fd(&self) -> std::os::unix::io::BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for GuardedFile {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.file.as_raw_fd()
     }
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────
 
 /// Attestation data recorded at the moment a file is opened through the jail.
+///
+/// This struct is `#[non_exhaustive]`: new fields may be added in future minor
+/// releases. Construct attestations only via [`FdJail::open`] / [`FdJail::create`];
+/// do not construct them in struct-literal syntax in your own code.
 ///
 /// The Ed25519 signature (when present) is the **trust anchor** for all other
 /// fields — an attacker who can forge an attestation struct can claim any inode
@@ -146,7 +170,7 @@ impl std::io::Seek for JailFile {
 ///
 /// # Signing
 ///
-/// Sign an attestation by calling [`JailFile::sign_attestation`] with any type
+/// Sign an attestation by calling [`GuardedFile::sign_attestation`] with any type
 /// that implements the [`Signer`](crate::guard::Signer) trait. The library does
 /// not vendor a crypto implementation — bring your own (`ed25519-dalek`,
 /// `ring`, HSM, KMS, etc.). See the [`signing`](crate::guard) module for
@@ -163,6 +187,7 @@ impl std::io::Seek for JailFile {
 /// for the same path in the same jail will produce identical `content_bytes`.
 /// `opened_at` intentionally differs and is excluded from `content_bytes`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Attestation {
     /// Canonicalized jail root at the time of `Jail::new`.
     pub jail_root: PathBuf,
@@ -174,7 +199,7 @@ pub struct Attestation {
     pub file_inode: u64,
     /// Device number (`st_dev`). Same device as root ⇒ hard link detection is valid.
     pub device: u64,
-    /// Hard link count (`st_nlink`). Caller decides policy; see [`JailFile::has_hard_links`].
+    /// Hard link count (`st_nlink`). Caller decides policy; see [`GuardedFile::has_hard_links`].
     pub nlink: u64,
     /// `true` if the open used `openat2(RESOLVE_BENEATH)` (Linux 5.6+), `false`
     /// on macOS/BSD fallback path.
@@ -353,7 +378,10 @@ impl OpenOptions {
 
 // ── Linux implementation ──────────────────────────────────────────────────────
 
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 mod linux_impl {
     use super::*;
     use crate::openat2::{
@@ -371,7 +399,7 @@ mod linux_impl {
         root_inode: u64,
         rel_path: &Path,
         opts: &OpenOptions,
-    ) -> Result<JailFile, JailError> {
+    ) -> Result<GuardedFile, JailError> {
         // Build the relative CStr path (openat2 requires relative for RESOLVE_BENEATH)
         let path_str = rel_path
             .to_str()
@@ -444,7 +472,7 @@ mod linux_impl {
             signature: None,
         };
 
-        Ok(JailFile { file, attestation })
+        Ok(GuardedFile { file, attestation })
     }
 
     fn map_errno_to_jail_error(e: Errno, path: &Path) -> JailError {
@@ -469,7 +497,10 @@ mod linux_impl {
 
 // ── macOS / BSD fallback ──────────────────────────────────────────────────────
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 mod fallback_impl {
     use super::*;
     use std::os::unix::fs::OpenOptionsExt;
@@ -482,7 +513,7 @@ mod fallback_impl {
         root_inode: u64,
         rel_path: &Path,
         opts: &OpenOptions,
-    ) -> Result<JailFile, JailError> {
+    ) -> Result<GuardedFile, JailError> {
         // Validate via existing path-walking logic first
         let abs_path = {
             let jail = crate::jail::Jail::new(jail_root)?;
@@ -531,7 +562,7 @@ mod fallback_impl {
             signature: None,
         };
 
-        Ok(JailFile { file, attestation })
+        Ok(GuardedFile { file, attestation })
     }
 }
 
@@ -541,7 +572,10 @@ mod fallback_impl {
 
 /// Returns the O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC flags for opening a directory fd.
 /// Used when pinning the jail root dirfd on Linux.
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn libc_open_directory_flags() -> i32 {
     // O_RDONLY=0, O_NOFOLLOW=0x20000 (linux), O_DIRECTORY=0x10000, O_CLOEXEC=0x80000
     0o0_200000 | 0o0_400000 | 0o2_000000 // O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
@@ -551,37 +585,107 @@ fn libc_open_directory_flags() -> i32 {
 ///
 /// On Linux this holds an open `dirfd` pinned at `Jail::new` time; on other
 /// platforms we derive the root inode from `std::fs::metadata`.
+///
+/// # Thread safety
+///
+/// `FdJail` is `Send + Sync` and can be shared across threads via `Arc<FdJail>`.
+/// `Clone` is supported: on Linux it `dup(2)`s the pinned directory fd so each
+/// clone holds its own independent fd.
 pub struct FdJail {
     /// Canonicalized jail root (same as `Jail::root()`).
     pub(crate) root: PathBuf,
     /// Root inode pinned at construction time.
     pub(crate) root_inode: u64,
     /// Open directory fd (Linux only).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub(crate) dirfd: std::os::unix::io::OwnedFd,
+}
+
+// SAFETY: OwnedFd is Send + Sync on Linux; PathBuf and u64 are always Send + Sync.
+unsafe impl Send for FdJail {}
+unsafe impl Sync for FdJail {}
+
+impl Clone for FdJail {
+    fn clone(&self) -> Self {
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        {
+            use std::os::unix::io::{AsFd, OwnedFd};
+            // dup(2) the directory fd so the clone is fully independent.
+            let duped: OwnedFd = self
+                .dirfd
+                .as_fd()
+                .try_clone_to_owned()
+                .expect("dup of jail dirfd failed");
+            FdJail {
+                root: self.root.clone(),
+                root_inode: self.root_inode,
+                dirfd: duped,
+            }
+        }
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        {
+            FdJail {
+                root: self.root.clone(),
+                root_inode: self.root_inode,
+            }
+        }
+    }
 }
 
 impl FdJail {
     /// Open the jail root directory and pin its inode.
     ///
-    /// On Linux 5.6+ this also verifies that `openat2` is available.
-    /// Returns `JailError::UnsupportedKernel` on Linux < 5.6. On macOS/BSD the
-    /// fallback path is used unconditionally (no separate feature gate); see
-    /// [`Attestation::toctou_safe`] to detect fallback at runtime.
+    /// On Linux 5.6+ this also verifies that `openat2` is available and returns
+    /// `JailError::UnsupportedKernel` on older kernels.
+    ///
+    /// # Platform behavior
+    ///
+    /// | Platform | Mechanism | TOCTOU-safe |
+    /// |---|---|---|
+    /// | Linux 5.6+ | `openat2(RESOLVE_BENEATH)` — single atomic syscall | **Yes** |
+    /// | macOS / BSD | `O_NOFOLLOW` on the final path component | **No** |
+    ///
+    /// On macOS and BSD this constructor always succeeds (there is no kernel
+    /// version gate), but every subsequent [`open`](Self::open) call uses the
+    /// same `O_NOFOLLOW`-based fallback as the `secure-open` feature. A race
+    /// window exists between path validation and the `open(2)` syscall.
+    ///
+    /// **Always check [`Attestation::toctou_safe`] if your threat model
+    /// requires kernel-enforced atomicity.** If `toctou_safe` is `false` and
+    /// you need stronger guarantees, run on Linux 5.6+ or use OS-level
+    /// isolation (container, chroot).
     pub fn new(root: impl AsRef<Path>) -> Result<Self, JailError> {
-        let root = root.as_ref().canonicalize().map_err(JailError::Io)?;
+        let root_input = root.as_ref().to_path_buf();
+        let root = root_input
+            .canonicalize()
+            .map_err(|e| JailError::InvalidRoot {
+                path: root_input.clone(),
+                source: Some(e),
+            })?;
 
         if root.parent().is_none() || !root.is_dir() {
-            return Err(JailError::InvalidJailRoot {
+            return Err(JailError::InvalidRoot {
                 path: root,
-                source: std::io::Error::new(
+                source: Some(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "not a directory or is filesystem root",
-                ),
+                )),
             });
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         {
             use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
             use std::os::unix::io::FromRawFd;
@@ -622,7 +726,10 @@ impl FdJail {
             })
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
         {
             // Emit a compile-time note (not an error — fallback is allowed)
             let meta = std::fs::metadata(&root).map_err(JailError::Io)?;
@@ -641,14 +748,24 @@ impl FdJail {
     /// with `O_NOFOLLOW` on the final component; `attestation().toctou_safe` will
     /// be `false`.
     ///
-    /// Returns a [`JailFile`] containing both the open [`File`] and attestation data.
-    pub fn open(&self, path: impl AsRef<Path>, opts: OpenOptions) -> Result<JailFile, JailError> {
+    /// Returns a [`GuardedFile`] containing both the open [`File`] and attestation data.
+    pub fn open(
+        &self,
+        path: impl AsRef<Path>,
+        opts: OpenOptions,
+    ) -> Result<GuardedFile, JailError> {
         let rel = self.validate_relative(path.as_ref())?;
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         return linux_impl::jail_open(&self.dirfd, &self.root, self.root_inode, &rel, &opts);
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
         return fallback_impl::jail_open(&self.root, self.root_inode, &rel, &opts);
     }
 
@@ -657,22 +774,25 @@ impl FdJail {
     /// Uses `O_CREAT | O_EXCL` — fails if the file already exists.
     /// The parent directory **must** already exist; this method does not create
     /// intermediate directories.
-    pub fn create(&self, path: impl AsRef<Path>) -> Result<JailFile, JailError> {
+    pub fn create(&self, path: impl AsRef<Path>) -> Result<GuardedFile, JailError> {
         self.open(path, OpenOptions::new().write(true).create_new(true))
     }
 
-    /// Validates a path without opening a file descriptor.
+    /// Validates a path without opening a file descriptor — for display or logging only.
     ///
-    /// Returns the validated relative path if it is safe. This is **weaker** than
-    /// [`open`](Self::open) because it does not hold an fd. Use it only for
-    /// logging or display purposes.
+    /// Returns the validated relative path if it passes the same format checks
+    /// as [`open`](Self::open). This is **weaker** than `open` because no fd
+    /// is held: the path can change between this call and any subsequent
+    /// filesystem operation.
     ///
-    /// # ⚠ Warning
+    /// # ⚠ Do not open after `check_path`
     ///
-    /// The returned `PathBuf` **MUST NOT** be passed to a subsequent `open` call.
-    /// Doing so reintroduces the TOCTOU window that `open` eliminates. Use
-    /// `open` if you intend to access the file.
-    pub fn check(&self, path: impl AsRef<Path>) -> Result<PathBuf, JailError> {
+    /// The returned `PathBuf` **MUST NOT** be passed to a subsequent `open` or
+    /// `create` call. Doing so reintroduces the TOCTOU window that `open`
+    /// eliminates atomically. Call `open` directly when you need to access the
+    /// file — use `check_path` only when you need a safe string for a log
+    /// entry, an error message, or an audit record.
+    pub fn check_path(&self, path: impl AsRef<Path>) -> Result<PathBuf, JailError> {
         self.validate_relative(path.as_ref())
     }
 

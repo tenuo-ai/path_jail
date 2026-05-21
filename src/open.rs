@@ -39,7 +39,9 @@ const O_NOFOLLOW: i32 = 0x0100;
 #[cfg(target_os = "dragonfly")]
 const O_NOFOLLOW: i32 = 0x0100;
 
-// Fallback for other Unix-like systems
+// If we reach this point we are on a Unix that path_jail does not know the
+// O_NOFOLLOW value for. Setting it to 0 would silently disable the symlink
+// protection, which is a security bug. Fail loudly instead.
 #[cfg(not(any(
     target_os = "linux",
     target_os = "macos",
@@ -48,7 +50,13 @@ const O_NOFOLLOW: i32 = 0x0100;
     target_os = "netbsd",
     target_os = "dragonfly"
 )))]
-const O_NOFOLLOW: i32 = 0;
+compile_error!(
+    "path_jail secure-open: O_NOFOLLOW is not known for this Unix platform. \
+     Setting it to 0 would silently follow symlinks and defeat the feature's \
+     purpose. Please open an issue at https://github.com/tenuo-ai/path_jail \
+     with your target triple and the correct O_NOFOLLOW value from your \
+     system headers."
+);
 
 /// A file opened with TOCTOU-safe semantics.
 ///

@@ -131,13 +131,17 @@ or hostile multi-tenant →     └───────────────
 
 ## Versioning & supported releases
 
-- We follow semver. While we are pre-1.0 (`0.y.z`), minor-version bumps
-  (`0.4 → 0.5`) may include breaking changes; patch bumps (`0.4.0 → 0.4.1`)
-  will not.
+- We follow [Semantic Versioning](https://semver.org/). In the `0.y.z`
+  pre-release series, minor-version bumps (`0.4 → 0.5`) may include breaking
+  API changes; patch bumps (`0.4.0 → 0.4.1`) will not. Starting with `1.0.0`,
+  the standard semver contract applies: only major bumps (`1.x → 2.0`) may
+  break the public API.
 - Security fixes are issued on the latest minor line. We do not currently
-  backport to older 0.x lines.
-- The MSRV (currently 1.85) may be bumped in any minor release. We treat MSRV
-  bumps as breaking.
+  backport to older `0.x` lines; after `1.0.0` we will evaluate backports
+  case-by-case for high-severity findings.
+- The MSRV (currently 1.85) may be bumped in any minor release in the `0.x`
+  series. After `1.0.0`, MSRV bumps will be treated as minor-version changes
+  and documented in the changelog.
 
 ---
 
@@ -180,5 +184,5 @@ environments, **strongly prefer `guard`** over the path-based API:
 - Anywhere "the file you validated" and "the file you opened" need to be
   the same file with certainty
 
-We may make `guard` the default in a future major release. For now, choose
-explicitly.
+We may make `guard` the default in `1.0.0` or a future major release. For now,
+choose explicitly.

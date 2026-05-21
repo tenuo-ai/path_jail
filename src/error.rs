@@ -13,8 +13,15 @@ pub enum JailError {
     BrokenSymlink(PathBuf),
     /// Path is invalid (e.g., contains absolute components or null bytes).
     InvalidPath(String),
-    /// Jail root is invalid (path-based API).
-    InvalidRoot(PathBuf),
+    /// Jail root is invalid (filesystem root, not a directory, or inaccessible).
+    ///
+    /// `source` is `Some` when an I/O error was the proximate cause (e.g.,
+    /// permission denied opening the directory). It is `None` when the root
+    /// was rejected on structural grounds (e.g., the path is `/` or `C:\`).
+    InvalidRoot {
+        path: PathBuf,
+        source: Option<std::io::Error>,
+    },
 
     // ── guard API variants ─────────────────────────────────────────────────
     /// `openat2` returned `EXDEV` — path escapes jail or traverses above root.
@@ -33,15 +40,22 @@ pub enum JailError {
     /// A `/proc/self/fd`-style magic link was detected (`RESOLVE_NO_MAGICLINKS`).
     /// These links can escape the jail regardless of `RESOLVE_BENEATH`.
     ///
-    /// # Currently unreachable
+    /// # Deprecation
     ///
-    /// The Linux kernel returns the same errno (`ELOOP`) for both
-    /// `RESOLVE_NO_MAGICLINKS` and `RESOLVE_NO_SYMLINKS` rejections, and
-    /// userspace cannot tell them apart. As of v0.5, magic-link rejections
-    /// surface as [`Self::SymlinkRejected`] rather than this variant. The
-    /// variant is preserved (and not yet deprecated) so callers can match on
-    /// it if a future kernel ABI separates the two errnos.
+    /// **This variant is currently unreachable.** The Linux kernel returns the
+    /// same errno (`ELOOP`) for both `RESOLVE_NO_MAGICLINKS` and
+    /// `RESOLVE_NO_SYMLINKS` rejections; userspace cannot distinguish them.
+    /// Magic-link rejections therefore surface as [`Self::SymlinkRejected`].
+    ///
+    /// Match on `SymlinkRejected` instead. This variant is preserved so
+    /// existing `match` arms are not broken; it will be removed in a future
+    /// major version if the kernel introduces a distinct errno.
     #[cfg(feature = "guard")]
+    #[deprecated(
+        since = "0.4.0",
+        note = "unreachable: the kernel maps magic-link rejections to ELOOP, \
+                which surfaces as `SymlinkRejected`. Match on `SymlinkRejected` instead."
+    )]
     MagicLink { requested: PathBuf },
 
     /// `openat2(2)` is not available on this kernel (Linux < 5.6).
@@ -50,16 +64,13 @@ pub enum JailError {
     /// `/proc/sys/kernel/osrelease`, and `None` when `/proc` is unavailable
     /// (some hardened containers). In both cases the live `openat2` probe
     /// confirmed the syscall is not supported.
-    #[cfg(all(feature = "guard", target_os = "linux"))]
+    #[cfg(all(
+        feature = "guard",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     UnsupportedKernel {
         version: Option<crate::openat2::KernelVersion>,
-    },
-
-    /// Invalid root in the guard API (not a directory, filesystem root, or inaccessible).
-    #[cfg(feature = "guard")]
-    InvalidJailRoot {
-        path: PathBuf,
-        source: std::io::Error,
     },
 
     // ── Shared ────────────────────────────────────────────────────────────────
@@ -83,7 +94,13 @@ impl fmt::Display for JailError {
                 path.display()
             ),
             Self::InvalidPath(reason) => write!(f, "invalid path: {}", reason),
-            Self::InvalidRoot(path) => {
+            Self::InvalidRoot {
+                path,
+                source: Some(src),
+            } => {
+                write!(f, "invalid jail root '{}': {}", path.display(), src)
+            }
+            Self::InvalidRoot { path, source: None } => {
                 let reason = if path.parent().is_none() {
                     "cannot use filesystem root"
                 } else if !path.is_dir() {
@@ -108,26 +125,30 @@ impl fmt::Display for JailError {
                 requested.display()
             ),
             #[cfg(feature = "guard")]
+            #[allow(deprecated)]
             Self::MagicLink { requested } => write!(
                 f,
                 "magic link detected for path '{}' (RESOLVE_NO_MAGICLINKS)",
                 requested.display()
             ),
-            #[cfg(all(feature = "guard", target_os = "linux"))]
+            #[cfg(all(
+                feature = "guard",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
             Self::UnsupportedKernel { version: Some(v) } => {
                 write!(f, "openat2 not available on kernel {} (requires >= 5.6)", v)
             }
-            #[cfg(all(feature = "guard", target_os = "linux"))]
+            #[cfg(all(
+                feature = "guard",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
             Self::UnsupportedKernel { version: None } => write!(
                 f,
                 "openat2 not available on this kernel (requires >= 5.6; \
                  kernel version unreadable)"
             ),
-            #[cfg(feature = "guard")]
-            Self::InvalidJailRoot { path, source } => {
-                write!(f, "invalid jail root '{}': {}", path.display(), source)
-            }
-
             Self::Io(err) => write!(f, "io error: {}", err),
         }
     }
@@ -137,8 +158,9 @@ impl std::error::Error for JailError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
-            #[cfg(feature = "guard")]
-            Self::InvalidJailRoot { source, .. } => Some(source),
+            Self::InvalidRoot {
+                source: Some(src), ..
+            } => Some(src),
             _ => None,
         }
     }

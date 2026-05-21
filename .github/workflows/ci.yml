@@ -112,7 +112,5 @@ jobs:
       - name: Install cargo-semver-checks
         run: cargo install --locked cargo-semver-checks
       - name: Run cargo-semver-checks
-        run: cargo semver-checks check-release --all-features || true
-        # `|| true` for now: 0.4.0 is the first release with the guard surface
-        # so a baseline doesn't exist. Remove the suffix once a baseline ships.
+        run: cargo semver-checks check-release --all-features
 

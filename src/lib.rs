@@ -39,13 +39,13 @@
 //! use path_jail::guard::{FdJail, OpenOptions};
 //!
 //! let jail = FdJail::new("/var/uploads")?;
-//! let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
-//! if jf.has_hard_links() {
+//! let mut gf = jail.open("report.pdf", OpenOptions::new().read(true))?;
+//! if gf.has_hard_links() {
 //!     // Enforce hard-link policy here
 //! }
 //! use std::io::Read;
 //! let mut buf = Vec::new();
-//! jf.read_to_end(&mut buf)?;
+//! gf.read_to_end(&mut buf)?;
 //! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -91,7 +91,14 @@ mod jailed_path;
 #[cfg(all(feature = "secure-open", unix))]
 mod open;
 
-#[cfg(all(feature = "guard", target_os = "linux"))]
+// openat2 wrapper is only compiled for Linux architectures that have a
+// raw-asm syscall shim (x86_64 and aarch64). Other Linux arches and all
+// non-Linux platforms fall back to the O_NOFOLLOW path in guard/fd_jail.rs.
+#[cfg(all(
+    feature = "guard",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub(crate) mod openat2;
 
 // `guard` is Unix-only — the implementation uses `OwnedFd`, `MetadataExt`,

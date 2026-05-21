@@ -20,7 +20,10 @@ impl Jail {
         // Reject filesystem roots (/, C:\) - they have no parent
         // Reject non-directories (files, etc.)
         if root.parent().is_none() || !root.is_dir() {
-            return Err(JailError::InvalidRoot(root));
+            return Err(JailError::InvalidRoot {
+                path: root,
+                source: None,
+            });
         }
         Ok(Self { root })
     }
@@ -190,6 +193,9 @@ impl Jail {
     /// This is safer than `join(format!("{}/{}", a, b))` because it validates
     /// each segment independently.
     ///
+    /// Empty strings in the iterator are silently skipped, consistent with how
+    /// most URL normalizers and shells handle empty path components.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -201,6 +207,11 @@ impl Jail {
     ///
     /// // Safe: each segment is validated
     /// let path = jail.join_segments([user_id, "files", filename])?;
+    ///
+    /// // Empty segments are skipped — these produce the same path:
+    /// let a = jail.join_segments(["user", "file"])?;
+    /// let b = jail.join_segments(["user", "", "file"])?;
+    /// assert_eq!(a, b);
     ///
     /// // These would fail:
     /// // jail.join_segments(["../etc", "passwd"])?;     // ".." rejected
