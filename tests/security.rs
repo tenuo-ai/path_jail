@@ -10,7 +10,7 @@ fn rejects_filesystem_root() {
     #[cfg(unix)]
     {
         let err = Jail::new("/").unwrap_err();
-        assert!(matches!(err, JailError::InvalidRoot(_)));
+        assert!(matches!(err, JailError::InvalidRoot { .. }));
         let msg = format!("{}", err);
         assert!(msg.contains("filesystem root"));
     }
@@ -18,7 +18,7 @@ fn rejects_filesystem_root() {
     #[cfg(windows)]
     {
         let err = Jail::new("C:\\").unwrap_err();
-        assert!(matches!(err, JailError::InvalidRoot(_)));
+        assert!(matches!(err, JailError::InvalidRoot { .. }));
         let msg = format!("{}", err);
         assert!(msg.contains("filesystem root"));
     }
@@ -32,7 +32,7 @@ fn invalid_root_captures_path() {
 
     // Verify the error captures the canonicalized path
     let err = Jail::new("/").unwrap_err();
-    if let JailError::InvalidRoot(path) = err {
+    if let JailError::InvalidRoot { path, .. } = err {
         assert_eq!(path, Path::new("/"));
     } else {
         panic!("Expected InvalidRoot error");
@@ -93,7 +93,7 @@ fn rejects_file_as_root() {
 
     // Cannot use a file as jail root
     let err = Jail::new(&file_path).unwrap_err();
-    assert!(matches!(err, JailError::InvalidRoot(_)));
+    assert!(matches!(err, JailError::InvalidRoot { .. }));
     let msg = format!("{}", err);
     assert!(msg.contains("not a directory"));
 }

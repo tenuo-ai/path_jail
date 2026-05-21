@@ -9,18 +9,6 @@ use std::ffi::CStr;
 use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
 use std::sync::OnceLock;
 
-// ── Architecture guard ────────────────────────────────────────────────────────
-
-// The inline-asm syscall shim is implemented for x86_64 and aarch64.
-// riscv64 uses a different register convention (a7/a0-a5) and is not yet
-// supported. Reject other architectures with a compile error rather than
-// silently producing broken binaries.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!(
-    "path_jail guard: only x86_64 and aarch64 Linux are currently supported for the raw-asm syscall path. \
-     riscv64 support is planned. Track: https://github.com/tenuo-ai/path_jail/issues"
-);
-
 // SYS_openat2 — syscall number on Linux (added in 5.6). Same value on x86_64
 // and aarch64 (the kernel keeps recent syscall numbers aligned across arches).
 const SYS_OPENAT2: i64 = 437;
@@ -166,7 +154,11 @@ unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
 // ── Kernel version probe ───────────────────────────────────────────────────────
 
 /// Parsed kernel version (major, minor, patch).
+///
+/// `#[non_exhaustive]`: new components (e.g. a build/variant suffix) may be
+/// added in future releases without breaking `PartialOrd`/`Ord`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct KernelVersion {
     pub major: u32,
     pub minor: u32,

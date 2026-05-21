@@ -174,13 +174,13 @@ fn ac3_magic_link_blocked() {
     // rejection from a regular symlink rejection (see JailError::MagicLink
     // docs). Escape (EXDEV) is also acceptable if the kernel resolved
     // /proc/self/root as a regular link before noticing the cross-mount.
+    #[allow(deprecated)]
+    let is_expected = matches!(
+        err,
+        JailError::MagicLink { .. } | JailError::Escape { .. } | JailError::SymlinkRejected { .. }
+    );
     assert!(
-        matches!(
-            err,
-            JailError::MagicLink { .. }
-                | JailError::Escape { .. }
-                | JailError::SymlinkRejected { .. }
-        ),
+        is_expected,
         "expected MagicLink, Escape, or SymlinkRejected for /proc/self/root, got: {:?}",
         err
     );
@@ -442,7 +442,7 @@ fn ac8_api_surface_stable() {
 
     let jail = FdJail::new(dir.path()).unwrap();
 
-    // open() returns JailFile with Read + attestation
+    // open() returns GuardedFile with Read + attestation
     let mut jf = jail
         .open("upload.bin", OpenOptions::new().read(true))
         .unwrap();
@@ -473,12 +473,12 @@ fn ac8_api_surface_stable() {
         b"written"
     );
 
-    // check() returns relative path (weaker — no fd held)
-    let rel = jail.check("upload.bin").unwrap();
+    // check_path() returns relative path (weaker — no fd held)
+    let rel = jail.check_path("upload.bin").unwrap();
     assert_eq!(rel, std::path::Path::new("upload.bin"));
 
-    // check() rejects absolute paths
-    assert!(jail.check("/etc/passwd").is_err());
+    // check_path() rejects absolute paths
+    assert!(jail.check_path("/etc/passwd").is_err());
 }
 
 // ── Additional: TOCTOU-safe flag ─────────────────────────────────────────────
@@ -535,6 +535,72 @@ fn no_xdev_succeeds_when_no_mount_crossing() {
     let jail = FdJail::new(dir.path()).unwrap();
     jail.open("a.txt", OpenOptions::new().read(true).no_xdev(true))
         .expect("open with no_xdev should succeed when no mount is crossed");
+}
+
+// ── Clone / Send / Sync for FdJail ───────────────────────────────────────────
+
+#[test]
+#[cfg(unix)]
+fn fd_jail_clone_is_independent() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("shared.txt");
+    std::fs::write(&file, b"hello").unwrap();
+
+    let jail = FdJail::new(dir.path()).unwrap();
+    let jail2 = jail.clone();
+
+    // Both clones should be able to open the same file independently.
+    let mut jf1 = jail
+        .open("shared.txt", OpenOptions::new().read(true))
+        .unwrap();
+    let mut jf2 = jail2
+        .open("shared.txt", OpenOptions::new().read(true))
+        .unwrap();
+
+    let mut buf1 = Vec::new();
+    let mut buf2 = Vec::new();
+    jf1.read_to_end(&mut buf1).unwrap();
+    jf2.read_to_end(&mut buf2).unwrap();
+
+    assert_eq!(buf1, b"hello");
+    assert_eq!(buf2, b"hello");
+    // The two opens are independent fds pointing to the same inode.
+    assert_eq!(jf1.attestation().file_inode, jf2.attestation().file_inode);
+}
+
+#[test]
+#[cfg(unix)]
+fn fd_jail_is_send_sync() {
+    // Compile-time assertion: FdJail and GuardedFile can be sent across threads.
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<FdJail>();
+    // GuardedFile is not Send/Sync (it wraps a raw File which has platform-specific rules),
+    // but FdJail, which is shared to produce GuardedFiles, is.
+}
+
+#[test]
+#[cfg(unix)]
+fn fd_jail_clone_shared_via_arc() {
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("arc.txt");
+    std::fs::write(&file, b"arc content").unwrap();
+
+    let jail = Arc::new(FdJail::new(dir.path()).unwrap());
+    let jail2 = Arc::clone(&jail);
+
+    let handle = std::thread::spawn(move || {
+        let mut jf = jail2
+            .open("arc.txt", OpenOptions::new().read(true))
+            .unwrap();
+        let mut buf = Vec::new();
+        jf.read_to_end(&mut buf).unwrap();
+        buf
+    });
+
+    let buf = handle.join().unwrap();
+    assert_eq!(buf, b"arc content");
 }
 
 // ── no_symlinks option ────────────────────────────────────────────────────────
