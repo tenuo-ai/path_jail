@@ -31,4 +31,4 @@ guard = []
 tempfile = "3"
 
 [package.metadata]
-authors = ["Niki A. <dev@tenuo.dev>"]
+authors = ["Niki A. <dev@tenuo.ai>"]

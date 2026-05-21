@@ -15,7 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `FdJail::create()` — `O_CREAT | O_EXCL` atomic creation
   - `FdJail::check_path()` — validate a path without opening (for logging/display only; re-opening reintroduces TOCTOU)
   - `OpenOptions` — mirrors the relevant subset of `std::fs::OpenOptions`; adds `no_symlinks` (`RESOLVE_NO_SYMLINKS`) and `no_xdev` (`RESOLVE_NO_XDEV`)
-  - `JailFile` — wraps the opened `File` alongside an `Attestation` snapshot; implements `Read`, `Write`, `Seek`, `Deref<Target=File>`
   - `GuardedFile` — wraps the opened `File` alongside an `Attestation` snapshot; implements `Read`, `Write`, `Seek`, `Deref<Target=File>`, `AsFd`, `AsRawFd` (Unix)
   - `GuardedFile::has_hard_links()` — detects hard links (data-exfiltration vector) via `nlink` from `fstat`
   - `Attestation` (`#[non_exhaustive]`) — records `jail_root`, `opened_path`, `root_inode`, `file_inode`, `device`, `nlink`, `toctou_safe`, `opened_at`, and an optional 64-byte signature
@@ -36,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `SymlinkRejected { requested }` — `openat2` returned `ELOOP`; covers symlink loops and `no_symlinks` policy rejections; also surfaces magic-link rejections because the kernel maps both to `ELOOP`
   - `MagicLink { requested }` — reserved for a future kernel ABI that separates magic-link errno; currently unreachable (see deprecation note)
   - `UnsupportedKernel { version }` — `openat2` not available on kernel < 5.6 (`#[cfg(target_os = "linux")]`)
-  - `InvalidJailRoot { path, source }` — invalid root in the guard API
 
 ### Changed
 
