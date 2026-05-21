@@ -8,7 +8,7 @@
 
 A zero-dependency filesystem sandbox for Rust. Restricts paths to a root directory, preventing traversal attacks while supporting files that don't exist yet.
 
-Maintained by **[Tenuo](https://tenuo.ai)** — visit us at [tenuo.ai](https://tenuo.ai).
+Maintained by **[Tenuo](https://tenuo.ai)**.
 
 **Python bindings:** [`path-jail`](https://github.com/tenuo-ai/path-jail-python) on PyPI
 
