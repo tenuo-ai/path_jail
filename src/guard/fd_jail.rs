@@ -374,6 +374,21 @@ impl OpenOptions {
         self.no_xdev = v;
         self
     }
+
+    fn validate(&self) -> Result<(), JailError> {
+        let can_write = self.write || self.append;
+        if (self.create || self.create_new) && !can_write {
+            return Err(JailError::InvalidPath(
+                "create/create_new requires write or append access".into(),
+            ));
+        }
+        if self.truncate && !self.write {
+            return Err(JailError::InvalidPath(
+                "truncate requires write access".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ── Linux implementation ──────────────────────────────────────────────────────
@@ -385,8 +400,9 @@ impl OpenOptions {
 mod linux_impl {
     use super::*;
     use crate::openat2::{
-        openat2, Errno, OpenHow, O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY,
-        RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
+        mkdirat, openat2, renameat2, unlinkat, Errno, OpenHow, AT_REMOVEDIR, O_APPEND, O_CLOEXEC,
+        O_CREAT, O_DIRECTORY, O_EXCL, O_PATH, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, RESOLVE_BENEATH,
+        RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
     };
     use std::ffi::CString;
     use std::os::unix::fs::MetadataExt;
@@ -401,26 +417,21 @@ mod linux_impl {
         opts: &OpenOptions,
     ) -> Result<GuardedFile, JailError> {
         // Build the relative CStr path (openat2 requires relative for RESOLVE_BENEATH)
-        let path_str = rel_path
-            .to_str()
-            .ok_or_else(|| JailError::InvalidPath("path contains invalid UTF-8".into()))?;
-        if path_str.contains('\0') {
-            return Err(JailError::InvalidPath("null bytes not allowed".into()));
-        }
-        let cpath = CString::new(path_str)
+        use std::os::unix::ffi::OsStrExt;
+        let cpath = CString::new(rel_path.as_os_str().as_bytes())
             .map_err(|_| JailError::InvalidPath("could not convert path to C string".into()))?;
 
-        // Build O_* flags. Precedence: append > write > read.
-        // append implies write (POSIX), so we set both in one branch to avoid
-        // double-OR'ing O_WRONLY when the caller sets both .write(true).append(true).
+        // Build the access mode independently from O_APPEND. This matches
+        // std::fs::OpenOptions: read+write/append means O_RDWR, not O_WRONLY.
         let mut flags: u64 = O_CLOEXEC;
+        let wants_write = opts.write || opts.append;
+        flags |= match (opts.read, wants_write) {
+            (true, true) => O_RDWR,
+            (false, true) => O_WRONLY,
+            _ => O_RDONLY,
+        };
         if opts.append {
-            flags |= O_APPEND | O_WRONLY;
-        } else if opts.write {
-            flags |= O_WRONLY;
-        } else {
-            // read-only is the default (O_RDONLY = 0, but set explicitly for clarity)
-            flags |= O_RDONLY;
+            flags |= O_APPEND;
         }
         if opts.create {
             flags |= O_CREAT;
@@ -493,6 +504,74 @@ mod linux_impl {
             _ => JailError::Io(e.into()),
         }
     }
+
+    fn path_component(path: &Path) -> Result<(&Path, CString), JailError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = path.file_name().ok_or_else(|| {
+            JailError::InvalidPath("operation requires a final path component".into())
+        })?;
+        if name == "." || name == ".." {
+            return Err(JailError::InvalidPath(
+                "final path component cannot be '.' or '..'".into(),
+            ));
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| JailError::InvalidPath("null bytes not allowed".into()))?;
+        Ok((parent, name))
+    }
+
+    fn open_parent(dirfd: &OwnedFd, parent: &Path) -> Result<OwnedFd, JailError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let cpath = CString::new(parent.as_os_str().as_bytes())
+            .map_err(|_| JailError::InvalidPath("null bytes not allowed".into()))?;
+        let how = OpenHow {
+            flags: O_PATH | O_DIRECTORY | O_CLOEXEC,
+            mode: 0,
+            resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+        };
+        openat2(dirfd.as_raw_fd(), &cpath, &how).map_err(|e| map_errno_to_jail_error(e, parent))
+    }
+
+    pub(crate) fn create_dir(dirfd: &OwnedFd, path: &Path, mode: u32) -> Result<(), JailError> {
+        let (parent, name) = path_component(path)?;
+        let parent = open_parent(dirfd, parent)?;
+        mkdirat(parent.as_raw_fd(), &name, mode & 0o7777).map_err(|e| JailError::Io(e.into()))
+    }
+
+    pub(crate) fn remove_file(dirfd: &OwnedFd, path: &Path) -> Result<(), JailError> {
+        let (parent, name) = path_component(path)?;
+        let parent = open_parent(dirfd, parent)?;
+        unlinkat(parent.as_raw_fd(), &name, 0).map_err(|e| JailError::Io(e.into()))
+    }
+
+    pub(crate) fn remove_dir(dirfd: &OwnedFd, path: &Path) -> Result<(), JailError> {
+        let (parent, name) = path_component(path)?;
+        let parent = open_parent(dirfd, parent)?;
+        unlinkat(parent.as_raw_fd(), &name, AT_REMOVEDIR).map_err(|e| JailError::Io(e.into()))
+    }
+
+    pub(crate) fn rename(dirfd: &OwnedFd, from: &Path, to: &Path) -> Result<(), JailError> {
+        let (from_parent, from_name) = path_component(from)?;
+        let (to_parent, to_name) = path_component(to)?;
+        let from_parent = open_parent(dirfd, from_parent)?;
+        let to_parent = open_parent(dirfd, to_parent)?;
+        renameat2(
+            from_parent.as_raw_fd(),
+            &from_name,
+            to_parent.as_raw_fd(),
+            &to_name,
+            0,
+        )
+        .map_err(|e| JailError::Io(e.into()))
+    }
 }
 
 // ── macOS / BSD fallback ──────────────────────────────────────────────────────
@@ -505,8 +584,33 @@ mod fallback_impl {
     use super::*;
     use std::os::unix::fs::OpenOptionsExt;
 
-    // O_NOFOLLOW is 0x0100 on macOS and all BSDs — no cfg needed.
+    // O_NOFOLLOW differs between the Linux ABI and macOS/BSD. This fallback
+    // also serves Linux architectures without an openat2 asm shim, so using
+    // the Darwin value unconditionally would silently follow final symlinks.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_NOFOLLOW: i32 = 0o0400000;
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     const O_NOFOLLOW: i32 = 0x0100;
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    compile_error!(
+        "path_jail guard: O_NOFOLLOW is unknown for this Unix target; refusing to build an unsafe fallback"
+    );
 
     pub(crate) fn jail_open(
         jail_root: &Path,
@@ -604,44 +708,44 @@ pub struct FdJail {
     pub(crate) dirfd: std::os::unix::io::OwnedFd,
 }
 
-// SAFETY: OwnedFd is Send + Sync on Linux; PathBuf and u64 are always Send + Sync.
-unsafe impl Send for FdJail {}
-unsafe impl Sync for FdJail {}
-
 impl Clone for FdJail {
     fn clone(&self) -> Self {
+        self.try_clone()
+            .expect("failed to duplicate the pinned jail directory descriptor")
+    }
+}
+
+impl FdJail {
+    /// Creates an independent clone of this jail without panicking on fd exhaustion.
+    ///
+    /// Prefer this over [`Clone::clone`] in long-running services where `dup(2)`
+    /// can fail because the process has reached its file-descriptor limit.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
         #[cfg(all(
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ))]
         {
-            use std::os::unix::io::{AsFd, OwnedFd};
-            // dup(2) the directory fd so the clone is fully independent.
-            let duped: OwnedFd = self
-                .dirfd
-                .as_fd()
-                .try_clone_to_owned()
-                .expect("dup of jail dirfd failed");
-            FdJail {
+            use std::os::unix::io::AsFd;
+            Ok(Self {
                 root: self.root.clone(),
                 root_inode: self.root_inode,
-                dirfd: duped,
-            }
+                dirfd: self.dirfd.as_fd().try_clone_to_owned()?,
+            })
         }
+
         #[cfg(not(all(
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         )))]
         {
-            FdJail {
+            Ok(Self {
                 root: self.root.clone(),
                 root_inode: self.root_inode,
-            }
+            })
         }
     }
-}
 
-impl FdJail {
     /// Open the jail root directory and pin its inode.
     ///
     /// On Linux 5.6+ this also verifies that `openat2` is available and returns
@@ -671,8 +775,12 @@ impl FdJail {
                 path: root_input.clone(),
                 source: Some(e),
             })?;
+        let root_meta = std::fs::metadata(&root).map_err(|e| JailError::InvalidRoot {
+            path: root.clone(),
+            source: Some(e),
+        })?;
 
-        if root.parent().is_none() || !root.is_dir() {
+        if root.parent().is_none() || !root_meta.is_dir() {
             return Err(JailError::InvalidRoot {
                 path: root,
                 source: Some(std::io::Error::new(
@@ -712,7 +820,17 @@ impl FdJail {
                 .open(&root)
                 .map_err(JailError::Io)?;
 
-            let root_inode = dir_file.metadata().map_err(JailError::Io)?.ino();
+            let opened_meta = dir_file.metadata().map_err(JailError::Io)?;
+            if opened_meta.dev() != root_meta.dev() || opened_meta.ino() != root_meta.ino() {
+                return Err(JailError::InvalidRoot {
+                    path: root,
+                    source: Some(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "jail root changed while it was being opened",
+                    )),
+                });
+            }
+            let root_inode = opened_meta.ino();
             // Transfer ownership into OwnedFd (File will not close it).
             let dirfd = unsafe {
                 std::os::unix::io::OwnedFd::from_raw_fd(std::os::unix::io::IntoRawFd::into_raw_fd(
@@ -732,11 +850,10 @@ impl FdJail {
         )))]
         {
             // Emit a compile-time note (not an error — fallback is allowed)
-            let meta = std::fs::metadata(&root).map_err(JailError::Io)?;
             use std::os::unix::fs::MetadataExt;
             Ok(FdJail {
                 root,
-                root_inode: meta.ino(),
+                root_inode: root_meta.ino(),
             })
         }
     }
@@ -754,6 +871,7 @@ impl FdJail {
         path: impl AsRef<Path>,
         opts: OpenOptions,
     ) -> Result<GuardedFile, JailError> {
+        opts.validate()?;
         let rel = self.validate_relative(path.as_ref())?;
 
         #[cfg(all(
@@ -778,6 +896,55 @@ impl FdJail {
         self.open(path, OpenOptions::new().write(true).create_new(true))
     }
 
+    /// Atomically creates a directory beneath the pinned jail root.
+    ///
+    /// Available on Linux x86_64/aarch64. The parent path is resolved with
+    /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and pinned before
+    /// `mkdirat(2)` executes, so concurrent parent renames cannot redirect it.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        let path = self.validate_relative(path.as_ref())?;
+        linux_impl::create_dir(&self.dirfd, &path, 0o777)
+    }
+
+    /// Removes a non-directory entry beneath the pinned jail root.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        let path = self.validate_relative(path.as_ref())?;
+        linux_impl::remove_file(&self.dirfd, &path)
+    }
+
+    /// Removes an empty directory beneath the pinned jail root.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn remove_dir(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        let path = self.validate_relative(path.as_ref())?;
+        linux_impl::remove_dir(&self.dirfd, &path)
+    }
+
+    /// Atomically renames an entry between two locations beneath the jail root.
+    ///
+    /// This has normal Linux rename semantics: an existing destination may be
+    /// replaced. Both parent directories are independently pinned beneath the
+    /// jail before `renameat2(2)` executes.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), JailError> {
+        let from = self.validate_relative(from.as_ref())?;
+        let to = self.validate_relative(to.as_ref())?;
+        linux_impl::rename(&self.dirfd, &from, &to)
+    }
+
     /// Validates a path without opening a file descriptor — for display or logging only.
     ///
     /// Returns the validated relative path if it passes the same format checks
@@ -793,7 +960,13 @@ impl FdJail {
     /// file — use `check_path` only when you need a safe string for a log
     /// entry, an error message, or an audit record.
     pub fn check_path(&self, path: impl AsRef<Path>) -> Result<PathBuf, JailError> {
-        self.validate_relative(path.as_ref())
+        let rel = self.validate_relative(path.as_ref())?;
+        let jail = crate::jail::Jail::new(&self.root)?;
+        let checked = jail.join(&rel)?;
+        checked
+            .strip_prefix(jail.root())
+            .map(Path::to_path_buf)
+            .map_err(|_| JailError::Escape { requested: rel })
     }
 
     /// Returns the canonicalized jail root.
@@ -807,10 +980,8 @@ impl FdJail {
     /// kernel. This is not the security check — `openat2` is — but it keeps
     /// userspace errors (absolute paths, null bytes) out of the kernel.
     fn validate_relative(&self, path: &Path) -> Result<PathBuf, JailError> {
-        let s = path
-            .to_str()
-            .ok_or_else(|| JailError::InvalidPath("path contains invalid UTF-8".into()))?;
-        if s.contains('\0') {
+        use std::os::unix::ffi::OsStrExt;
+        if path.as_os_str().as_bytes().contains(&0) {
             return Err(JailError::InvalidPath("null bytes not allowed".into()));
         }
         if path.is_absolute() {

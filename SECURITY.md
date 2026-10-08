@@ -57,6 +57,7 @@ tradeoffs. Pick the strongest one your environment supports.
 | Hard link to sensitive content (detect)       | ❌² | ❌² | ✅³                 |
 | Bind-mount escape (opt-in)                    | ❌  | ❌  | ✅⁴                 |
 | Atomic open with kernel-enforced containment  | ❌  | ❌  | ✅                  |
+| Atomic fd-relative create/remove/rename       | ❌  | ❌  | ✅⁶                 |
 | Signed attestation of the open event          | ❌  | ❌  | ✅⁵                 |
 
 Footnotes:
@@ -76,6 +77,17 @@ Footnotes:
    are what most callers want.
 5. Opt in by implementing the `Signer` trait. `path_jail` ships no crypto;
    bring your own (`ed25519-dalek`, `ring`, HSM client, KMS, etc.).
+
+   Version 0.4 attestations prove that a holder of the configured signing key
+   signed the recorded fields. They do **not** include a verifier challenge,
+   audience, key identifier, or expiration policy, and are therefore
+   replayable. Do not use them as authorization tokens. Bind freshness and
+   request context in the surrounding protocol until the versioned attestation
+   format is available.
+6. `create_dir`, `remove_file`, `remove_dir`, and `rename` are available only
+   on Linux x86_64/aarch64. They pin parent directories beneath the jail before
+   issuing fd-relative mutation syscalls. They are omitted on fallback targets
+   rather than exposing a racy pathname implementation.
 
 ---
 

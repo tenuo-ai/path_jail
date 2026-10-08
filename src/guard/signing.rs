@@ -13,25 +13,42 @@
 //! `opened_at`. The format is deterministic and free of length-ambiguity:
 //! see the doc on `signing_bytes` for the exact layout.
 //!
-//! # Example: ed25519-dalek
+//! # Example adapter shape
 //!
-//! ```ignore
-//! use ed25519_dalek::{Signature, Signer as DalekSigner, SigningKey, Verifier as DalekVerifier, VerifyingKey};
+//! This toy adapter is deliberately **not cryptographic**; it exists so the
+//! trait integration is compiled by rustdoc. Production adapters should wrap
+//! Ed25519 (or another reviewed 64-byte signature implementation).
+//!
+//! ```
 //! use path_jail::guard::{Signer, Verifier};
+//! use std::convert::Infallible;
 //!
-//! struct DalekS(SigningKey);
-//! impl Signer for DalekS {
-//!     type Error = std::convert::Infallible;
+//! struct ExampleAdapter;
+//! impl Signer for ExampleAdapter {
+//!     type Error = Infallible;
 //!     fn sign(&self, msg: &[u8]) -> Result<[u8; 64], Self::Error> {
-//!         Ok(self.0.sign(msg).to_bytes())
+//!         let mut out = [0; 64];
+//!         for (index, byte) in msg.iter().enumerate() {
+//!             out[index % 64] ^= byte;
+//!         }
+//!         Ok(out)
 //!     }
 //! }
 //!
-//! struct DalekV(VerifyingKey);
-//! impl Verifier for DalekV {
-//!     type Error = ed25519_dalek::SignatureError;
+//! #[derive(Debug)]
+//! struct Invalid;
+//! impl std::fmt::Display for Invalid {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         f.write_str("invalid signature")
+//!     }
+//! }
+//! impl std::error::Error for Invalid {}
+//!
+//! impl Verifier for ExampleAdapter {
+//!     type Error = Invalid;
 //!     fn verify(&self, msg: &[u8], sig: &[u8; 64]) -> Result<(), Self::Error> {
-//!         self.0.verify(msg, &Signature::from_bytes(sig))
+//!         let expected = self.sign(msg).unwrap();
+//!         (expected == *sig).then_some(()).ok_or(Invalid)
 //!     }
 //! }
 //! ```

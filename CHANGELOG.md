@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Linux x86_64/aarch64 `guard` operations for fd-relative directory creation,
+  file/directory removal, and rename. Parent directories are pinned with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` before the matching `*at`
+  syscall executes.
+- `FdJail::try_clone()` for services that need to handle file-descriptor
+  exhaustion without the panic inherent in the `Clone` trait.
+- Scheduled fuzzing of arbitrary path bytes and a privileged bind-mount test
+  for `RESOLVE_NO_XDEV`.
+
+### Fixed
+
+- Correct `O_NOFOLLOW` on Linux/Android architectures using the guard fallback;
+  the previous macOS/BSD constant could silently follow a final symlink.
+- `FdJail::check_path()` now performs a point-in-time path containment check and
+  rejects traversal and symlink escapes.
+- Linux `OpenOptions` now handles read+write as `O_RDWR` and rejects invalid
+  create/truncate access combinations consistently across platforms.
+- Path validation now propagates metadata/permission errors instead of treating
+  them as nonexistent paths.
+- The guard API accepts non-UTF-8 Unix paths.
+
+### Documentation
+
+- Correct magic-link errors to `SymlinkRejected`, compile the signing adapter
+  example, publish all-feature docs on docs.rs, and document v1 attestation
+  replay limitations.
+
 ## [0.4.0] - 2026-05-21
 
 ### Added
@@ -119,4 +150,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Symlink escape detection
 - Broken symlink rejection
 - Path traversal prevention
-

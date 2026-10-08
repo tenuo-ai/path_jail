@@ -1,0 +1,23 @@
+name: Privileged security tests
+
+on:
+  schedule:
+    - cron: '43 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bind-mount-containment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
+        with:
+          toolchain: stable
+      - name: Verify RESOLVE_NO_XDEV rejects bind mounts
+        run: |
+          sudo env "PATH=$PATH" "HOME=$HOME" \
+            cargo test --all-features --test guard \
+            no_xdev_rejects_bind_mount -- --ignored --exact

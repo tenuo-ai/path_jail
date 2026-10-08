@@ -10,7 +10,8 @@
 //! on the target file. It does NOT protect against symlink swaps on intermediate
 //! directories (that would require `openat()` walking, which needs `libc`).
 //!
-//! For full TOCTOU protection against local attackers, use [`cap-std`](https://docs.rs/cap-std).
+//! For full TOCTOU protection against local attackers on Linux 5.6+, enable
+//! the `guard` feature and use `path_jail::guard::FdJail`.
 
 #![cfg(all(feature = "secure-open", unix))]
 

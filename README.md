@@ -519,12 +519,27 @@ let mut out = jail.create("output.bin")?;
 out.write_all(b"processed")?;
 ```
 
-**On macOS/BSD:** falls back to an `O_NOFOLLOW`-based open (same protection as `secure-open`). `attestation().toctou_safe` will be `false`.
+**On macOS/BSD and Linux architectures without an `openat2` shim:** falls back
+to an `O_NOFOLLOW`-based open (same protection as `secure-open`).
+`attestation().toctou_safe` will be `false`.
+
+On Linux x86_64/aarch64, guarded mutations stay fd-relative as well:
+
+```rust
+jail.create_dir("work")?;
+jail.rename("incoming/report.pdf", "work/report.pdf")?;
+jail.remove_file("work/report.pdf")?;
+jail.remove_dir("work")?;
+```
+
+These methods are intentionally unavailable on fallback platforms because a
+pathname-based fallback would reintroduce the race they are designed to avoid.
 
 **Blocked by `openat2`:**
 - Symlink escapes (`/etc` link inside jail) → `JailError::Escape`
 - `..` traversal → `JailError::Escape`
-- `/proc/self/root` and other magic links → `JailError::MagicLink`
+- `/proc/self/root` and other magic links → `JailError::SymlinkRejected`
+  (Linux reports `ELOOP` for both magic-link and ordinary symlink rejection)
 - Symlinks when `no_symlinks(true)` → `JailError::SymlinkRejected`
 
 **Returns `JailError::UnsupportedKernel`** on Linux kernels older than 5.6. Zero additional dependencies — raw syscall, no libc.
@@ -581,4 +596,3 @@ cargo clippy
 ## License
 
 MIT OR Apache-2.0
-

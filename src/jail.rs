@@ -58,12 +58,7 @@ impl Jail {
             match component {
                 Component::Normal(name) => {
                     current.push(name);
-                    // If it exists, resolve symlinks and check bounds
-                    if current.exists() {
-                        current = self.verify_inside(current)?;
-                    } else if current.is_symlink() {
-                        return Err(JailError::BrokenSymlink(current));
-                    }
+                    current = self.resolve_if_present(current)?;
                 }
                 Component::ParentDir => {
                     current.pop();
@@ -75,11 +70,7 @@ impl Jail {
                         });
                     }
                     // Re-verify after pop (parent might be a symlink)
-                    if current.exists() {
-                        current = self.verify_inside(current)?;
-                    } else if current.is_symlink() {
-                        return Err(JailError::BrokenSymlink(current));
-                    }
+                    current = self.resolve_if_present(current)?;
                 }
                 Component::CurDir => {} // Ignore "."
                 Component::RootDir | Component::Prefix(_) => {
@@ -103,6 +94,34 @@ impl Jail {
             });
         }
         Ok(canonical)
+    }
+
+    /// Resolve an existing component and fail closed on metadata errors.
+    /// `Path::exists`/`is_symlink` collapse permission and I/O errors to false,
+    /// which is not acceptable for a security boundary.
+    fn resolve_if_present(&self, path: PathBuf) -> Result<PathBuf, JailError> {
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => match path.canonicalize() {
+                Ok(canonical) => {
+                    if !canonical.starts_with(&self.root) {
+                        return Err(JailError::EscapedRoot {
+                            attempted: path,
+                            root: self.root.clone(),
+                        });
+                    }
+                    Ok(canonical)
+                }
+                Err(err)
+                    if meta.file_type().is_symlink()
+                        && err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    Err(JailError::BrokenSymlink(path))
+                }
+                Err(err) => Err(JailError::Io(err)),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(path),
+            Err(err) => Err(JailError::Io(err)),
+        }
     }
 
     /// Verify an absolute path is inside the jail.

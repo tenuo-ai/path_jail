@@ -77,7 +77,10 @@ impl Verifier for TestVerifier {
 // (strace would show one openat2 syscall, no file open)
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn ac1_traversal_returns_escape() {
     let dir = tempdir().unwrap();
     let jail = FdJail::new(dir.path()).unwrap();
@@ -99,7 +102,10 @@ fn ac1_traversal_returns_escape() {
 
 // macOS: same test but we expect EscapedRoot (fallback path-walk variant)
 #[test]
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 fn ac1_traversal_blocked_on_fallback() {
     let dir = tempdir().unwrap();
     let jail = FdJail::new(dir.path()).unwrap();
@@ -148,7 +154,10 @@ fn ac2_symlink_escape_blocked() {
 // (only on Linux; /proc/self/root is a magic link)
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn ac3_magic_link_blocked() {
     use std::path::Path;
 
@@ -412,7 +421,10 @@ fn ac6_signature_rejected_on_tampered_field() {
 // The old-kernel path can only be tested via mocking; we test the type exists.
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn ac7_fd_jail_new_succeeds_on_modern_kernel() {
     let dir = tempdir().unwrap();
     // If this succeeds, the kernel is >= 5.6. If it returns UnsupportedKernel,
@@ -479,6 +491,48 @@ fn ac8_api_surface_stable() {
 
     // check_path() rejects absolute paths
     assert!(jail.check_path("/etc/passwd").is_err());
+
+    // check_path() performs a point-in-time containment check, rather than
+    // merely validating string shape.
+    assert!(jail.check_path("../../etc/passwd").is_err());
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/etc/passwd", dir.path().join("escape-link")).unwrap();
+        assert!(jail.check_path("escape-link").is_err());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn read_write_options_open_a_read_write_descriptor() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("rw.txt"), b"before").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let mut file = jail
+        .open("rw.txt", OpenOptions::new().read(true).write(true))
+        .unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "before");
+    file.write_all(b"after").unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn invalid_open_option_combinations_are_rejected_consistently() {
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.open("new.txt", OpenOptions::new().create(true)),
+        Err(JailError::InvalidPath(_))
+    ));
+    assert!(matches!(
+        jail.open("new.txt", OpenOptions::new().truncate(true)),
+        Err(JailError::InvalidPath(_))
+    ));
 }
 
 // ── Additional: TOCTOU-safe flag ─────────────────────────────────────────────
@@ -493,10 +547,16 @@ fn toctou_safe_reflects_platform() {
     let jail = FdJail::new(dir.path()).unwrap();
     let jf = jail.open("f.txt", OpenOptions::new().read(true)).unwrap();
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     assert!(jf.attestation().toctou_safe, "Linux should be TOCTOU-safe");
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
     assert!(
         !jf.attestation().toctou_safe,
         "macOS/BSD fallback is not TOCTOU-safe"
@@ -505,18 +565,8 @@ fn toctou_safe_reflects_platform() {
 
 // ── no_xdev option ───────────────────────────────────────────────────────────
 
-// TODO(no_xdev): the test below only proves the builder type-checks. The
-// real EXDEV-on-mount-crossing assertion needs a bind mount, which requires
-// CAP_SYS_ADMIN and is not available in the default GitHub Actions runner.
-// Plan: add a separate workflow (e.g. .github/workflows/privileged-tests.yml)
-// that runs under `sudo unshare -m` or a privileged container and includes a
-// `#[ignore]`d test marked `#[cfg(target_os = "linux")]` that:
-//   1. mkdir jail/mnt && mkdir external
-//   2. mount --bind external jail/mnt
-//   3. assert FdJail::new(jail).open("mnt/foo", OpenOptions::new().read(true)
-//        .no_xdev(true)) returns JailError::Escape
-//   4. umount jail/mnt
-// Until that workflow exists, this builder test is the only signal we have.
+// The privileged bind-mount behavior is exercised by the ignored test below
+// via .github/workflows/privileged-tests.yml.
 #[test]
 #[cfg(unix)]
 fn no_xdev_option_compiles_and_is_chainable() {
@@ -525,7 +575,10 @@ fn no_xdev_option_compiles_and_is_chainable() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn no_xdev_succeeds_when_no_mount_crossing() {
     // Without a mount-point crossing, no_xdev must not produce a spurious EXDEV.
     let dir = tempdir().unwrap();
@@ -535,6 +588,46 @@ fn no_xdev_succeeds_when_no_mount_crossing() {
     let jail = FdJail::new(dir.path()).unwrap();
     jail.open("a.txt", OpenOptions::new().read(true).no_xdev(true))
         .expect("open with no_xdev should succeed when no mount is crossed");
+}
+
+#[test]
+#[ignore = "requires root/CAP_SYS_ADMIN; exercised by privileged-tests.yml"]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn no_xdev_rejects_bind_mount() {
+    use std::process::Command;
+
+    let workspace = tempdir().unwrap();
+    let jail_root = workspace.path().join("jail");
+    let mountpoint = jail_root.join("mnt");
+    let external = workspace.path().join("external");
+    std::fs::create_dir_all(&mountpoint).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("outside.txt"), b"outside").unwrap();
+
+    let mounted = Command::new("mount")
+        .args(["--bind"])
+        .arg(&external)
+        .arg(&mountpoint)
+        .status()
+        .expect("run mount --bind");
+    assert!(mounted.success(), "mount --bind failed");
+
+    let result = FdJail::new(&jail_root).and_then(|jail| {
+        jail.open(
+            "mnt/outside.txt",
+            OpenOptions::new().read(true).no_xdev(true),
+        )
+    });
+
+    let unmounted = Command::new("umount")
+        .arg(&mountpoint)
+        .status()
+        .expect("run umount");
+    assert!(unmounted.success(), "umount failed");
+    assert!(matches!(result, Err(JailError::Escape { .. })));
 }
 
 // ── Clone / Send / Sync for FdJail ───────────────────────────────────────────
@@ -566,6 +659,36 @@ fn fd_jail_clone_is_independent() {
     assert_eq!(buf2, b"hello");
     // The two opens are independent fds pointing to the same inode.
     assert_eq!(jf1.attestation().file_inode, jf2.attestation().file_inode);
+}
+
+#[test]
+#[cfg(unix)]
+fn fd_jail_try_clone_is_independent() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("shared.txt"), b"hello").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    let clone = jail.try_clone().unwrap();
+
+    clone
+        .open("shared.txt", OpenOptions::new().read(true))
+        .unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn guard_accepts_non_utf8_unix_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempdir().unwrap();
+    let name = OsString::from_vec(vec![b'f', b'i', b'l', b'e', 0xff]);
+    std::fs::write(dir.path().join(&name), b"bytes").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let mut file = jail.open(&name, OpenOptions::new().read(true)).unwrap();
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).unwrap();
+    assert_eq!(contents, b"bytes");
 }
 
 #[test]
@@ -606,7 +729,10 @@ fn fd_jail_clone_shared_via_arc() {
 // ── no_symlinks option ────────────────────────────────────────────────────────
 
 #[test]
-#[cfg(all(unix, target_os = "linux"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn no_symlinks_rejects_symlink_inside_jail() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("real.txt");
@@ -630,4 +756,43 @@ fn no_symlinks_rejects_symlink_inside_jail() {
         "expected SymlinkRejected, got: {:?}",
         err
     );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_mutations_stay_beneath_the_jail() {
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    jail.create_dir("work").unwrap();
+    std::fs::write(dir.path().join("work/source.txt"), b"data").unwrap();
+    jail.rename("work/source.txt", "work/destination.txt")
+        .unwrap();
+    assert!(!dir.path().join("work/source.txt").exists());
+    assert!(dir.path().join("work/destination.txt").exists());
+
+    jail.remove_file("work/destination.txt").unwrap();
+    jail.remove_dir("work").unwrap();
+    assert!(!dir.path().join("work").exists());
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_mutations_reject_symlink_parent_escape() {
+    let jail_dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), jail_dir.path().join("escape")).unwrap();
+    let jail = FdJail::new(jail_dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.create_dir("escape/created"),
+        Err(JailError::Escape { .. })
+    ));
+    assert!(!outside.path().join("created").exists());
 }

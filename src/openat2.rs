@@ -31,13 +31,31 @@ pub(crate) const RESOLVE_NO_XDEV: u64 = 0x01;
 // O_* flags (x86_64 Linux)
 pub(crate) const O_RDONLY: u64 = 0;
 pub(crate) const O_WRONLY: u64 = 1;
-#[allow(dead_code)]
 pub(crate) const O_RDWR: u64 = 2;
 pub(crate) const O_CREAT: u64 = 0o100;
 pub(crate) const O_EXCL: u64 = 0o200;
 pub(crate) const O_TRUNC: u64 = 0o1000;
 pub(crate) const O_APPEND: u64 = 0o2000;
 pub(crate) const O_CLOEXEC: u64 = 0o2000000;
+pub(crate) const O_DIRECTORY: u64 = 0o200000;
+pub(crate) const O_PATH: u64 = 0o10000000;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_MKDIRAT: i64 = 258;
+#[cfg(target_arch = "aarch64")]
+const SYS_MKDIRAT: i64 = 34;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_UNLINKAT: i64 = 263;
+#[cfg(target_arch = "aarch64")]
+const SYS_UNLINKAT: i64 = 35;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_RENAMEAT2: i64 = 316;
+#[cfg(target_arch = "aarch64")]
+const SYS_RENAMEAT2: i64 = 276;
+
+pub(crate) const AT_REMOVEDIR: i32 = 0x200;
 
 // ── Errno ─────────────────────────────────────────────────────────────────────
 
@@ -90,6 +108,60 @@ pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedF
     }
 }
 
+pub(crate) fn mkdirat(dirfd: RawFd, name: &CStr, mode: u32) -> Result<(), Errno> {
+    let ret = unsafe {
+        syscall4(
+            SYS_MKDIRAT,
+            dirfd as i64,
+            name.as_ptr() as i64,
+            mode as i64,
+            0,
+        )
+    };
+    syscall_unit(ret)
+}
+
+pub(crate) fn unlinkat(dirfd: RawFd, name: &CStr, flags: i32) -> Result<(), Errno> {
+    let ret = unsafe {
+        syscall4(
+            SYS_UNLINKAT,
+            dirfd as i64,
+            name.as_ptr() as i64,
+            flags as i64,
+            0,
+        )
+    };
+    syscall_unit(ret)
+}
+
+pub(crate) fn renameat2(
+    old_dirfd: RawFd,
+    old_name: &CStr,
+    new_dirfd: RawFd,
+    new_name: &CStr,
+    flags: u32,
+) -> Result<(), Errno> {
+    let ret = unsafe {
+        syscall5(
+            SYS_RENAMEAT2,
+            old_dirfd as i64,
+            old_name.as_ptr() as i64,
+            new_dirfd as i64,
+            new_name.as_ptr() as i64,
+            flags as i64,
+        )
+    };
+    syscall_unit(ret)
+}
+
+fn syscall_unit(ret: i64) -> Result<(), Errno> {
+    if ret < 0 {
+        Err(Errno(-ret as i32))
+    } else {
+        Ok(())
+    }
+}
+
 /// Raw 4-argument syscall shim — avoids a libc dependency.
 ///
 /// # Safety
@@ -114,6 +186,25 @@ unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
         in("rsi") a1,
         in("rdx") a2,
         in("r10") a3,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack),
+    );
+    ret
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn syscall5(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        inlateout("rax") nr => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
+        in("r8") a4,
         out("rcx") _,
         out("r11") _,
         options(nostack),
@@ -146,6 +237,23 @@ unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
         in("x1") a1,
         in("x2") a2,
         in("x3") a3,
+        options(nostack),
+    );
+    ret
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn syscall5(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
+    let ret: i64;
+    std::arch::asm!(
+        "svc #0",
+        in("x8") nr,
+        inout("x0") a0 => ret,
+        in("x1") a1,
+        in("x2") a2,
+        in("x3") a3,
+        in("x4") a4,
         options(nostack),
     );
     ret

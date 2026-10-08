@@ -1,0 +1,22 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  path-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
+        with:
+          toolchain: nightly
+      - name: Install pinned cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.2
+      - name: Fuzz arbitrary path bytes
+        run: cargo +nightly fuzz run path_inputs -- -max_total_time=120
