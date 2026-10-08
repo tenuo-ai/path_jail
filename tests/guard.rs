@@ -924,3 +924,169 @@ fn check_path_matches_open_for_absolute_symlink_into_jail() {
     assert!(jail.check_path("new/dir/file.txt").is_ok());
     assert!(jail.check_path("data.txt").is_ok());
 }
+
+// ── Handle policies: file type and hard links ─────────────────────────────────
+
+#[test]
+#[cfg(unix)]
+fn require_regular_file_accepts_regular_file_and_exposes_metadata() {
+    use path_jail::guard::FileKind;
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let file = jail
+        .open(
+            "a.txt",
+            OpenOptions::new().read(true).require_regular_file(true),
+        )
+        .unwrap();
+    assert_eq!(file.file_kind(), FileKind::Regular);
+    assert_eq!(file.opened_metadata().len(), 5);
+    assert_eq!(file.opened_metadata().ino(), file.attestation().file_inode);
+}
+
+#[test]
+#[cfg(unix)]
+fn require_regular_file_rejects_directory() {
+    use path_jail::guard::FileKind;
+
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    // Without the policy a read-only open of a directory succeeds.
+    assert_eq!(
+        jail.open("sub", OpenOptions::new().read(true))
+            .unwrap()
+            .file_kind(),
+        FileKind::Directory
+    );
+    assert!(matches!(
+        jail.open(
+            "sub",
+            OpenOptions::new().read(true).require_regular_file(true)
+        ),
+        Err(JailError::FileTypeRejected {
+            file_type: FileKind::Directory,
+            ..
+        })
+    ));
+}
+
+#[test]
+#[cfg(unix)]
+fn require_regular_file_rejects_fifo_without_blocking() {
+    use path_jail::guard::FileKind;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("pipe"))
+        .status()
+        .expect("mkfifo available");
+    assert!(status.success());
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    // A blocking open would wait forever for a writer; run it on a thread so a
+    // regression fails the test instead of hanging the suite.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = jail.open(
+            "pipe",
+            OpenOptions::new().read(true).require_regular_file(true),
+        );
+        let _ = tx.send(matches!(
+            result,
+            Err(JailError::FileTypeRejected {
+                file_type: FileKind::Fifo,
+                ..
+            })
+        ));
+    });
+    let rejected = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("open of a FIFO blocked instead of being rejected");
+    assert!(rejected);
+}
+
+#[test]
+#[cfg(unix)]
+fn require_regular_file_rejects_socket() {
+    let dir = tempdir().unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(dir.path().join("sock")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    // The kernel refuses to open a socket (ENXIO) before fstat can classify it.
+    assert!(jail
+        .open(
+            "sock",
+            OpenOptions::new().read(true).require_regular_file(true)
+        )
+        .is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn reject_hard_links_blocks_linked_file_and_skips_truncate() {
+    let jail_dir = tempdir().unwrap();
+    // Same filesystem as the jail, but outside it.
+    let outside = jail_dir.path().join("outside.txt");
+    let root = jail_dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(&outside, b"sensitive").unwrap();
+    std::fs::hard_link(&outside, root.join("link.txt")).unwrap();
+    let jail = FdJail::new(&root).unwrap();
+
+    // Without the policy the guard happily opens the outside inode.
+    assert!(jail.open("link.txt", OpenOptions::new().read(true)).is_ok());
+
+    let result = jail.open(
+        "link.txt",
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .reject_hard_links(true),
+    );
+    assert!(matches!(
+        result,
+        Err(JailError::HardLinkRejected { nlink: 2, .. })
+    ));
+    // Truncation is deferred until the check passes, so the target is intact.
+    assert_eq!(std::fs::read(&outside).unwrap(), b"sensitive");
+}
+
+#[test]
+#[cfg(unix)]
+fn reject_hard_links_allows_single_link_and_applies_deferred_truncate() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"old contents").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let file = jail
+        .open(
+            "a.txt",
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .reject_hard_links(true)
+                .require_regular_file(true),
+        )
+        .unwrap();
+    assert_eq!(file.opened_metadata().len(), 0);
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"");
+
+    // A freshly created file has one link and passes.
+    assert!(jail
+        .open(
+            "new.txt",
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .reject_hard_links(true),
+        )
+        .is_ok());
+}

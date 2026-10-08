@@ -509,10 +509,15 @@ let att = jf.attestation();
 assert!(att.toctou_safe);            // true on Linux 5.6+
 assert!(att.signature.is_none());    // None until Ed25519 key is configured
 
-// Detect hard links (data exfiltration vector)
-if jf.has_hard_links() {
-    return Err("hard link policy violation");
-}
+// Untrusted trees: require a regular file and refuse hard links. Both checks
+// run on the opened handle (fstat), not on a re-resolved path.
+let upload = jail.open(
+    "incoming/data.csv",
+    OpenOptions::new()
+        .read(true)
+        .require_regular_file(true) // FIFOs, devices, dirs → FileTypeRejected
+        .reject_hard_links(true),   // nlink > 1 → HardLinkRejected
+)?;
 
 // Create a new file — fails if it already exists
 let mut out = jail.create("output.bin")?;
@@ -541,6 +546,14 @@ pathname-based fallback would reintroduce the race they are designed to avoid.
 - `/proc/self/root` and other magic links → `JailError::SymlinkRejected`
   (Linux reports `ELOOP` for both magic-link and ordinary symlink rejection)
 - Symlinks when `no_symlinks(true)` → `JailError::SymlinkRejected`
+
+**Not blocked by `openat2` — opt in with `OpenOptions` handle policies:**
+- Hard links: a hard link inside the jail can name an inode that also lives
+  outside it. `reject_hard_links(true)` → `JailError::HardLinkRejected`, and a
+  requested `truncate` is deferred until the check passes.
+- FIFOs, sockets and device nodes: `require_regular_file(true)` →
+  `JailError::FileTypeRejected`. The open uses `O_NONBLOCK`, so a planted FIFO
+  is rejected instead of hanging the caller.
 
 **Returns `JailError::UnsupportedKernel`** on Linux kernels older than 5.6. Zero additional dependencies — raw syscall, no libc.
 

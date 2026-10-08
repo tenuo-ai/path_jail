@@ -38,6 +38,7 @@ pub(crate) const O_CREAT: u64 = 0o100;
 pub(crate) const O_EXCL: u64 = 0o200;
 pub(crate) const O_TRUNC: u64 = 0o1000;
 pub(crate) const O_APPEND: u64 = 0o2000;
+pub(crate) const O_NONBLOCK: u64 = 0o4000;
 pub(crate) const O_CLOEXEC: u64 = 0o2000000;
 #[cfg(target_arch = "x86_64")]
 pub(crate) const O_DIRECTORY: u64 = 0o200000;
