@@ -11,7 +11,7 @@ keywords = ["security", "filesystem", "sandbox", "path", "traversal"]
 categories = ["filesystem", "security"]
 authors = ["Niki A. <dev@tenuo.ai>"]
 exclude = [
-    "docs/",          # design specs — not needed by crate consumers
+    "docs/",          # user guides (rendered on GitHub), not needed to build the crate
     ".claude/",       # IDE settings
     ".github/",       # CI config
     "tests/",         # integration tests (already excluded by cargo by default, explicit for clarity)
