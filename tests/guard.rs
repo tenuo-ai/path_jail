@@ -796,3 +796,80 @@ fn guarded_mutations_reject_symlink_parent_escape() {
     ));
     assert!(!outside.path().join("created").exists());
 }
+
+#[test]
+fn open_rejects_truncate_with_append() {
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    let opts = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .truncate(true)
+        .create(true);
+    assert!(matches!(
+        jail.open("f.txt", opts),
+        Err(JailError::InvalidPath(_))
+    ));
+}
+
+#[test]
+#[cfg(unix)]
+fn check_path_returns_callers_path_not_symlink_target() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/secret.txt"), b"x").unwrap();
+    std::os::unix::fs::symlink("sub/secret.txt", dir.path().join("link")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert_eq!(
+        jail.check_path("link").unwrap(),
+        std::path::PathBuf::from("link")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn check_path_rejects_replaced_root() {
+    let parent = tempdir().unwrap();
+    let root = parent.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let jail = FdJail::new(&root).unwrap();
+
+    std::fs::rename(&root, parent.path().join("moved")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+
+    assert!(matches!(
+        jail.check_path("file.txt"),
+        Err(JailError::InvalidRoot { .. })
+    ));
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_mutations_honor_no_symlinks() {
+    use path_jail::guard::ResolveOptions;
+
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::os::unix::fs::symlink("real", dir.path().join("alias")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    // Default resolution follows an in-jail symlink parent.
+    jail.create_dir("alias/a").unwrap();
+    assert!(dir.path().join("real/a").is_dir());
+
+    let strict = ResolveOptions::new().no_symlinks(true);
+    assert!(matches!(
+        jail.create_dir_with("alias/b", strict),
+        Err(JailError::SymlinkRejected { .. })
+    ));
+    assert!(matches!(
+        jail.remove_dir_with("alias/a", strict),
+        Err(JailError::SymlinkRejected { .. })
+    ));
+    jail.remove_dir_with("real/a", strict.no_xdev(true))
+        .unwrap();
+}

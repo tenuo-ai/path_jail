@@ -7,5 +7,5 @@
 mod fd_jail;
 mod signing;
 
-pub use fd_jail::{Attestation, FdJail, GuardedFile, OpenOptions};
+pub use fd_jail::{Attestation, FdJail, GuardedFile, OpenOptions, ResolveOptions};
 pub use signing::{Signer, Verifier, VerifyError};

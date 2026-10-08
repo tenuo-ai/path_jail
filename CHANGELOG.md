@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linux x86_64/aarch64 `guard` operations for fd-relative directory creation,
   file/directory removal, and rename. Parent directories are pinned with
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` before the matching `*at`
-  syscall executes.
+  syscall executes. `*_with` variants take `ResolveOptions` to apply
+  `no_symlinks`/`no_xdev` to parent resolution.
 - `FdJail::try_clone()` for services that need to handle file-descriptor
   exhaustion without the panic inherent in the `Clone` trait.
 - Scheduled fuzzing of arbitrary path bytes and a privileged bind-mount test
@@ -23,10 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct architecture-specific `O_NOFOLLOW` values on Linux/Android in both
   `secure-open` and the guard fallback; incorrect constants could silently
   follow a final symlink on ARM-family targets.
-- `FdJail::check_path()` now performs a point-in-time path containment check and
-  rejects traversal and symlink escapes.
+- Correct `O_DIRECTORY`/`O_NOFOLLOW` for the openat2 path on Linux aarch64,
+  where the x86_64 values mean `O_DIRECT`/`O_LARGEFILE`. The pinned root dirfd
+  previously lacked `O_DIRECTORY | O_NOFOLLOW` on aarch64.
+- `FdJail::check_path()` now performs a point-in-time path containment check,
+  rejects traversal and symlink escapes, rejects a replaced jail root, and
+  returns the caller's path rather than a symlink-resolved one.
 - Linux `OpenOptions` now handles read+write as `O_RDWR` and rejects invalid
-  create/truncate access combinations consistently across platforms.
+  create/truncate/append access combinations consistently across platforms.
 - Path validation now propagates metadata/permission errors instead of treating
   them as nonexistent paths.
 - The guard API accepts non-UTF-8 Unix paths.

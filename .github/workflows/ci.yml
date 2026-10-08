@@ -52,7 +52,8 @@ jobs:
       matrix:
         include:
           # cross's QEMU runner does not implement openat2. Compile every
-          # feature on AArch64, but run its secure-open suite without guard.
+          # feature on AArch64, but run its secure-open suite without guard;
+          # the aarch64-native job runs the guard suite.
           - target: aarch64-unknown-linux-gnu
             test_args: --features secure-open
           # ARMv7 uses the guard fallback, so exercise every feature at runtime.
@@ -67,6 +68,15 @@ jobs:
         run: cross build --all-features --target ${{ matrix.target }} --verbose
       - name: Test
         run: cross test ${{ matrix.test_args }} --target ${{ matrix.target }} --verbose
+
+  # Native AArch64 runner: the cross/QEMU job above cannot execute openat2,
+  # so this is where the guard feature's aarch64 flags and syscalls run for real.
+  aarch64-native:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+      - run: cargo test --all-features --verbose
 
   clippy:
     runs-on: ubuntu-latest

@@ -387,7 +387,48 @@ impl OpenOptions {
                 "truncate requires write access".into(),
             ));
         }
+        if self.truncate && self.append {
+            return Err(JailError::InvalidPath(
+                "truncate cannot be combined with append".into(),
+            ));
+        }
         Ok(())
+    }
+}
+
+// ── ResolveOptions ────────────────────────────────────────────────────────────
+
+/// Path-resolution options for the guard mutation operations
+/// (`FdJail::create_dir_with`, `remove_file_with`, `remove_dir_with` and
+/// `rename_with`; Linux x86_64/aarch64 only).
+///
+/// These apply to resolving the parent directory of each path. The final
+/// component is never followed: `unlinkat` and `renameat2` act on a symlink
+/// itself, and `mkdirat` fails if the name already exists.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResolveOptions {
+    pub(crate) no_symlinks: bool,
+    pub(crate) no_xdev: bool,
+}
+
+impl ResolveOptions {
+    /// Default options: symlinks and mount crossings inside the jail are allowed.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reject any symlink in the parent path (`RESOLVE_NO_SYMLINKS`).
+    pub fn no_symlinks(mut self, v: bool) -> Self {
+        self.no_symlinks = v;
+        self
+    }
+
+    /// Reject parent paths that cross a mount point (`RESOLVE_NO_XDEV`).
+    ///
+    /// Same bind-mount defense as [`OpenOptions::no_xdev`].
+    pub fn no_xdev(mut self, v: bool) -> Self {
+        self.no_xdev = v;
+        self
     }
 }
 
@@ -522,7 +563,11 @@ mod linux_impl {
         Ok((parent, name))
     }
 
-    fn open_parent(dirfd: &OwnedFd, parent: &Path) -> Result<OwnedFd, JailError> {
+    fn open_parent(
+        dirfd: &OwnedFd,
+        parent: &Path,
+        opts: &ResolveOptions,
+    ) -> Result<OwnedFd, JailError> {
         use std::os::unix::ffi::OsStrExt;
 
         let parent = if parent.as_os_str().is_empty() {
@@ -532,37 +577,62 @@ mod linux_impl {
         };
         let cpath = CString::new(parent.as_os_str().as_bytes())
             .map_err(|_| JailError::InvalidPath("null bytes not allowed".into()))?;
+        let mut resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
+        if opts.no_symlinks {
+            resolve |= RESOLVE_NO_SYMLINKS;
+        }
+        if opts.no_xdev {
+            resolve |= RESOLVE_NO_XDEV;
+        }
         let how = OpenHow {
             flags: O_PATH | O_DIRECTORY | O_CLOEXEC,
             mode: 0,
-            resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+            resolve,
         };
         openat2(dirfd.as_raw_fd(), &cpath, &how).map_err(|e| map_errno_to_jail_error(e, parent))
     }
 
-    pub(crate) fn create_dir(dirfd: &OwnedFd, path: &Path, mode: u32) -> Result<(), JailError> {
+    pub(crate) fn create_dir(
+        dirfd: &OwnedFd,
+        path: &Path,
+        mode: u32,
+        opts: &ResolveOptions,
+    ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent)?;
+        let parent = open_parent(dirfd, parent, opts)?;
         mkdirat(parent.as_raw_fd(), &name, mode & 0o7777).map_err(|e| JailError::Io(e.into()))
     }
 
-    pub(crate) fn remove_file(dirfd: &OwnedFd, path: &Path) -> Result<(), JailError> {
+    pub(crate) fn remove_file(
+        dirfd: &OwnedFd,
+        path: &Path,
+        opts: &ResolveOptions,
+    ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent)?;
+        let parent = open_parent(dirfd, parent, opts)?;
         unlinkat(parent.as_raw_fd(), &name, 0).map_err(|e| JailError::Io(e.into()))
     }
 
-    pub(crate) fn remove_dir(dirfd: &OwnedFd, path: &Path) -> Result<(), JailError> {
+    pub(crate) fn remove_dir(
+        dirfd: &OwnedFd,
+        path: &Path,
+        opts: &ResolveOptions,
+    ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent)?;
+        let parent = open_parent(dirfd, parent, opts)?;
         unlinkat(parent.as_raw_fd(), &name, AT_REMOVEDIR).map_err(|e| JailError::Io(e.into()))
     }
 
-    pub(crate) fn rename(dirfd: &OwnedFd, from: &Path, to: &Path) -> Result<(), JailError> {
+    pub(crate) fn rename(
+        dirfd: &OwnedFd,
+        from: &Path,
+        to: &Path,
+        opts: &ResolveOptions,
+    ) -> Result<(), JailError> {
         let (from_parent, from_name) = path_component(from)?;
         let (to_parent, to_name) = path_component(to)?;
-        let from_parent = open_parent(dirfd, from_parent)?;
-        let to_parent = open_parent(dirfd, to_parent)?;
+        let from_parent = open_parent(dirfd, from_parent, opts)?;
+        let to_parent = open_parent(dirfd, to_parent, opts)?;
         renameat2(
             from_parent.as_raw_fd(),
             &from_name,
@@ -676,7 +746,7 @@ mod fallback_impl {
     ) -> Result<GuardedFile, JailError> {
         // Validate via existing path-walking logic first
         let abs_path = {
-            let jail = crate::jail::Jail::new(jail_root)?;
+            let jail = crate::jail::Jail::from_canonical(jail_root.to_path_buf());
             jail.join(rel_path)?
         };
 
@@ -737,8 +807,10 @@ mod fallback_impl {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn libc_open_directory_flags() -> i32 {
-    // O_RDONLY=0, O_NOFOLLOW=0x20000 (linux), O_DIRECTORY=0x10000, O_CLOEXEC=0x80000
-    0o0_200000 | 0o0_400000 | 0o2_000000 // O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    use crate::openat2::{O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW};
+    // Use the per-arch constants: on aarch64 the x86_64 O_DIRECTORY/O_NOFOLLOW
+    // bits mean O_DIRECT/O_LARGEFILE.
+    (O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) as i32
 }
 
 /// State held by the fd-first `Jail` extension (stored alongside the path-based Jail).
@@ -962,8 +1034,21 @@ impl FdJail {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        self.create_dir_with(path, ResolveOptions::default())
+    }
+
+    /// [`create_dir`](Self::create_dir) with explicit [`ResolveOptions`].
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn create_dir_with(
+        &self,
+        path: impl AsRef<Path>,
+        opts: ResolveOptions,
+    ) -> Result<(), JailError> {
         let path = self.validate_relative(path.as_ref())?;
-        linux_impl::create_dir(&self.dirfd, &path, 0o777)
+        linux_impl::create_dir(&self.dirfd, &path, 0o777, &opts)
     }
 
     /// Removes a non-directory entry beneath the pinned jail root.
@@ -972,8 +1057,21 @@ impl FdJail {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        self.remove_file_with(path, ResolveOptions::default())
+    }
+
+    /// [`remove_file`](Self::remove_file) with explicit [`ResolveOptions`].
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn remove_file_with(
+        &self,
+        path: impl AsRef<Path>,
+        opts: ResolveOptions,
+    ) -> Result<(), JailError> {
         let path = self.validate_relative(path.as_ref())?;
-        linux_impl::remove_file(&self.dirfd, &path)
+        linux_impl::remove_file(&self.dirfd, &path, &opts)
     }
 
     /// Removes an empty directory beneath the pinned jail root.
@@ -982,8 +1080,21 @@ impl FdJail {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     pub fn remove_dir(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        self.remove_dir_with(path, ResolveOptions::default())
+    }
+
+    /// [`remove_dir`](Self::remove_dir) with explicit [`ResolveOptions`].
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn remove_dir_with(
+        &self,
+        path: impl AsRef<Path>,
+        opts: ResolveOptions,
+    ) -> Result<(), JailError> {
         let path = self.validate_relative(path.as_ref())?;
-        linux_impl::remove_dir(&self.dirfd, &path)
+        linux_impl::remove_dir(&self.dirfd, &path, &opts)
     }
 
     /// Atomically renames an entry between two locations beneath the jail root.
@@ -996,17 +1107,34 @@ impl FdJail {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), JailError> {
+        self.rename_with(from, to, ResolveOptions::default())
+    }
+
+    /// [`rename`](Self::rename) with explicit [`ResolveOptions`], applied to
+    /// both parent directories.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn rename_with(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+        opts: ResolveOptions,
+    ) -> Result<(), JailError> {
         let from = self.validate_relative(from.as_ref())?;
         let to = self.validate_relative(to.as_ref())?;
-        linux_impl::rename(&self.dirfd, &from, &to)
+        linux_impl::rename(&self.dirfd, &from, &to, &opts)
     }
 
     /// Validates a path without opening a file descriptor — for display or logging only.
     ///
-    /// Returns the validated relative path if it passes the same format checks
-    /// as [`open`](Self::open). This is **weaker** than `open` because no fd
-    /// is held: the path can change between this call and any subsequent
-    /// filesystem operation.
+    /// Returns the caller's relative path (not a symlink-resolved one) if it
+    /// passes the same format checks as [`open`](Self::open) and a
+    /// point-in-time containment walk beneath the jail root. Fails if the
+    /// directory at the root path is no longer the pinned root inode. This is
+    /// **weaker** than `open` because no fd is held: the path can change
+    /// between this call and any subsequent filesystem operation.
     ///
     /// # ⚠ Do not open after `check_path`
     ///
@@ -1016,13 +1144,24 @@ impl FdJail {
     /// file — use `check_path` only when you need a safe string for a log
     /// entry, an error message, or an audit record.
     pub fn check_path(&self, path: impl AsRef<Path>) -> Result<PathBuf, JailError> {
+        use std::os::unix::fs::MetadataExt;
+
         let rel = self.validate_relative(path.as_ref())?;
-        let jail = crate::jail::Jail::new(&self.root)?;
-        let checked = jail.join(&rel)?;
-        checked
-            .strip_prefix(jail.root())
-            .map(Path::to_path_buf)
-            .map_err(|_| JailError::Escape { requested: rel })
+        let root_meta = std::fs::metadata(&self.root).map_err(|e| JailError::InvalidRoot {
+            path: self.root.clone(),
+            source: Some(e),
+        })?;
+        if root_meta.ino() != self.root_inode {
+            return Err(JailError::InvalidRoot {
+                path: self.root.clone(),
+                source: Some(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "jail root was replaced after it was pinned",
+                )),
+            });
+        }
+        crate::jail::Jail::from_canonical(self.root.clone()).join(&rel)?;
+        Ok(rel)
     }
 
     /// Returns the canonicalized jail root.

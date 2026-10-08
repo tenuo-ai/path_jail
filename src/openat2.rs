@@ -28,7 +28,9 @@ pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 pub(crate) const RESOLVE_NO_XDEV: u64 = 0x01;
 
-// O_* flags (x86_64 Linux)
+// O_* flags. Most values are shared by x86_64 and aarch64, but O_DIRECTORY
+// and O_NOFOLLOW differ: aarch64 keeps the older ARM values, where the x86_64
+// O_DIRECTORY bit means O_DIRECT and the x86_64 O_NOFOLLOW bit means O_LARGEFILE.
 pub(crate) const O_RDONLY: u64 = 0;
 pub(crate) const O_WRONLY: u64 = 1;
 pub(crate) const O_RDWR: u64 = 2;
@@ -37,7 +39,14 @@ pub(crate) const O_EXCL: u64 = 0o200;
 pub(crate) const O_TRUNC: u64 = 0o1000;
 pub(crate) const O_APPEND: u64 = 0o2000;
 pub(crate) const O_CLOEXEC: u64 = 0o2000000;
+#[cfg(target_arch = "x86_64")]
 pub(crate) const O_DIRECTORY: u64 = 0o200000;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const O_DIRECTORY: u64 = 0o40000;
+#[cfg(target_arch = "x86_64")]
+pub(crate) const O_NOFOLLOW: u64 = 0o400000;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const O_NOFOLLOW: u64 = 0o100000;
 pub(crate) const O_PATH: u64 = 0o10000000;
 
 #[cfg(target_arch = "x86_64")]

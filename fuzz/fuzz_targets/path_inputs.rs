@@ -1,16 +1,25 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use path_jail::guard::FdJail;
 use path_jail::Jail;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-fn fuzz_root() -> &'static PathBuf {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("path-jail-fuzz-{}", std::process::id()));
-        std::fs::create_dir_all(&path).expect("create fuzz root");
-        path.canonicalize().expect("canonicalize fuzz root")
+struct Jails {
+    path: Jail,
+    fd: FdJail,
+}
+
+fn jails() -> &'static Jails {
+    static JAILS: OnceLock<Jails> = OnceLock::new();
+    JAILS.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("path-jail-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("create fuzz root");
+        Jails {
+            path: Jail::new(&root).expect("stable fuzz root"),
+            fd: FdJail::new(&root).expect("stable fuzz root"),
+        }
     })
 }
 
@@ -27,14 +36,18 @@ fn input_path(data: &[u8]) -> PathBuf {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let jail = Jail::new(fuzz_root()).expect("stable fuzz root");
+    let jails = jails();
     let candidate = input_path(data);
 
-    match jail.join(&candidate) {
-        Ok(joined) => {
-            assert!(joined.starts_with(jail.root()));
-            assert!(!joined.is_absolute() || joined.starts_with(fuzz_root()));
-        }
-        Err(_) => {}
+    let joined = jails.path.join(&candidate);
+    if let Ok(joined) = &joined {
+        assert!(joined.starts_with(jails.path.root()));
+    }
+
+    // check_path must agree with join and hand back the caller's path unchanged.
+    let checked = jails.fd.check_path(&candidate);
+    assert_eq!(checked.is_ok(), joined.is_ok());
+    if let Ok(checked) = checked {
+        assert_eq!(checked, candidate);
     }
 });
