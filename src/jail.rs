@@ -3,6 +3,11 @@ use crate::jailed_path::JailedPath;
 use std::path::{Component, Path, PathBuf};
 
 /// A filesystem sandbox that restricts paths to a root directory.
+///
+/// `Jail` validates paths and returns them; it does not hold a descriptor. A
+/// path it returns is checked at the moment of the call, and opening it later
+/// is a separate lookup. Use the `secure-open` or `guard` feature when other
+/// processes can modify the tree. See the [threat model](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against).
 #[derive(Debug, Clone)]
 pub struct Jail {
     root: PathBuf,
@@ -15,6 +20,11 @@ impl Jail {
     /// - Root does not exist
     /// - Root is not a directory
     /// - Root is a filesystem root (`/`, `C:\`, `\\server\share`)
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::Io`] if the root does not exist or cannot be canonicalized.
+    /// - [`JailError::InvalidRoot`] if the root is a filesystem root or not a directory.
     pub fn new<P: AsRef<Path>>(root: P) -> Result<Self, JailError> {
         let root = root.as_ref().canonicalize()?;
         // Reject filesystem roots (/, C:\) - they have no parent
@@ -47,6 +57,21 @@ impl Jail {
     /// Works even if the final path does not exist.
     ///
     /// Rejects absolute paths, null bytes, and paths that would escape the jail.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path or a null byte.
+    /// - [`JailError::EscapedRoot`] if `..` or a symlink resolves outside the root.
+    /// - [`JailError::BrokenSymlink`] for a symlink whose target is missing, or a symlink loop.
+    /// - [`JailError::Io`] if an existing component cannot be inspected (for example,
+    ///   permission denied). This fails closed rather than treating it as missing.
+    ///
+    /// # Security
+    ///
+    /// The check is point-in-time and returns a path, not a descriptor. Opening the
+    /// result later is a second lookup that another process can race by swapping in a
+    /// symlink. Use the `secure-open` or `guard` feature when the tree can change
+    /// concurrently; see the [threat model](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against).
     #[must_use = "use the returned path, not the original input"]
     pub fn join<P: AsRef<Path>>(&self, relative: P) -> Result<PathBuf, JailError> {
         let path = relative.as_ref();
@@ -127,6 +152,12 @@ impl Jail {
     /// Verify an absolute path is inside the jail.
     /// Returns the canonicalized path if it's inside, otherwise an error.
     /// The path must exist.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] if `absolute` is not absolute.
+    /// - [`JailError::Io`] if the path does not exist or cannot be canonicalized.
+    /// - [`JailError::EscapedRoot`] if it resolves outside the root.
     #[must_use = "use the returned path, not the original input"]
     pub fn contains<P: AsRef<Path>>(&self, absolute: P) -> Result<PathBuf, JailError> {
         let absolute = absolute.as_ref();
@@ -159,6 +190,10 @@ impl Jail {
     /// assert_eq!(rel, std::path::Path::new("2025/report.pdf"));
     /// # Ok::<(), path_jail::JailError>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`contains`](Self::contains): the path must exist and resolve inside the root.
     pub fn relative<P: AsRef<Path>>(&self, absolute: P) -> Result<PathBuf, JailError> {
         let path = absolute.as_ref();
 
@@ -201,6 +236,10 @@ impl Jail {
     /// write_safe(path, b"data")?;
     /// # Ok::<(), path_jail::JailError>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`join`](Self::join), including its point-in-time limitation.
     #[must_use = "use the returned JailedPath, not the original input"]
     pub fn join_typed<P: AsRef<Path>>(&self, relative: P) -> Result<JailedPath, JailError> {
         self.join(relative).map(JailedPath::new)
@@ -237,6 +276,11 @@ impl Jail {
     /// // jail.join_segments(["users/files"])?;          // "/" rejected
     /// # Ok::<(), path_jail::JailError>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] if a segment contains `/`, `\\`, or a null byte, or is `..`.
+    /// - Otherwise the same as [`join`](Self::join).
     #[must_use = "use the returned path, not the original input"]
     pub fn join_segments<I, S>(&self, segments: I) -> Result<PathBuf, JailError>
     where
@@ -286,6 +330,10 @@ impl Jail {
     /// let path: JailedPath = jail.segments(["users", "alice", "photo.jpg"])?;
     /// # Ok::<(), path_jail::JailError>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`join_segments`](Self::join_segments).
     #[must_use = "use the returned JailedPath, not the original input"]
     pub fn segments<I, S>(&self, segments: I) -> Result<JailedPath, JailError>
     where

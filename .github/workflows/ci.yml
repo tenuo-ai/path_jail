@@ -168,6 +168,31 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
       - run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Every `rust` block in README.md and docs/guides/ is either an ANCHOR region
+  # of a compiled program in doc-examples/examples or marked `rust,ignore`.
+  # Build them on Linux (openat2 path, create_dir/rename) and macOS (fallback).
+  doc-examples:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          components: rustfmt
+      - name: Format check
+        run: cargo fmt --manifest-path doc-examples/Cargo.toml --check
+      - name: Docs match compiled examples
+        run: python3 scripts/check_doc_examples.py
+      - name: Build examples
+        run: cargo build --manifest-path doc-examples/Cargo.toml --examples
+        env:
+          RUSTFLAGS: -D warnings
 
   # Supply-chain check: advisories, licenses, dep bans, sources.
   # Config lives in deny.toml.

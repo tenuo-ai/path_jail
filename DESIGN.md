@@ -262,11 +262,9 @@ Enabling `guard` on Windows compiles without error but is a no-op (all items are
 
 ## 7. Platform Support Matrix
 
-| Feature | Linux 5.6+ (x86_64/aarch64) | Linux < 5.6 | macOS / BSD / other Linux arches | Windows |
-|---|---|---|---|---|
-| `default` | ✓ | ✓ | ✓ | ✓ |
-| `secure-open` | ✓ | ✓ | ✓ | no-op |
-| `guard` (TOCTOU-safe) | ✓ | `UnsupportedKernel` error | fallback (`toctou_safe=false`) | no-op |
+The maintained matrix (features × kernel × architecture × OS, plus what CI
+runs) is in [README.md § Platform support](README.md#platform-support). Keep it
+there only, so it cannot drift.
 
 ---
 

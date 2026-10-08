@@ -7,8 +7,17 @@ use std::path::PathBuf;
 #[non_exhaustive]
 pub enum JailError {
     // ── Original variants (path-based API) ────────────────────────────────────
-    /// Path would escape the jail root (path-based API).
-    EscapedRoot { attempted: PathBuf, root: PathBuf },
+    /// Path would escape the jail root.
+    ///
+    /// Returned by the path-based API (`Jail::join` and friends) and by the
+    /// `guard` fallback, which validates with `Jail::join` before opening.
+    /// The openat2 path reports the same condition as `Escape`.
+    EscapedRoot {
+        /// The path, built from the caller's input, that resolved outside the root.
+        attempted: PathBuf,
+        /// The jail's canonical root.
+        root: PathBuf,
+    },
     /// Path contains a broken symlink (cannot verify target is safe).
     BrokenSymlink(PathBuf),
     /// Path is invalid (e.g., contains absolute components or null bytes).
@@ -19,23 +28,33 @@ pub enum JailError {
     /// permission denied opening the directory). It is `None` when the root
     /// was rejected on structural grounds (e.g., the path is `/` or `C:\`).
     InvalidRoot {
+        /// The root that was rejected (canonicalized when canonicalization succeeded).
         path: PathBuf,
+        /// The I/O error that caused the rejection, if any.
         source: Option<std::io::Error>,
     },
 
     // ── guard API variants ─────────────────────────────────────────────────
     /// `openat2` returned `EXDEV` — path escapes jail or traverses above root.
     ///
-    /// Covers symlink escapes, `..` traversal, and absolute path injection.
-    /// This is the primary security error; one audit log entry covers the entire
-    /// class of containment failures.
+    /// Covers symlink escapes, `..` traversal above the root, absolute
+    /// symlinks, and (with `no_xdev`) mount-point crossings. Absolute input
+    /// paths are rejected earlier as [`Self::InvalidPath`]. This is the primary
+    /// security error; one audit log entry covers the entire class of
+    /// containment failures.
     #[cfg(feature = "guard")]
-    Escape { requested: PathBuf },
+    Escape {
+        /// The relative path the caller asked to open.
+        requested: PathBuf,
+    },
 
     /// `openat2` returned `ELOOP` — symlink loop, or `RESOLVE_NO_SYMLINKS` was
     /// set via [`OpenOptions::no_symlinks`](crate::guard::OpenOptions::no_symlinks).
     #[cfg(feature = "guard")]
-    SymlinkRejected { requested: PathBuf },
+    SymlinkRejected {
+        /// The relative path the caller asked to open.
+        requested: PathBuf,
+    },
 
     /// A `/proc/self/fd`-style magic link was detected (`RESOLVE_NO_MAGICLINKS`).
     /// These links can escape the jail regardless of `RESOLVE_BENEATH`.
@@ -56,7 +75,10 @@ pub enum JailError {
         note = "unreachable: the kernel maps magic-link rejections to ELOOP, \
                 which surfaces as `SymlinkRejected`. Match on `SymlinkRejected` instead."
     )]
-    MagicLink { requested: PathBuf },
+    MagicLink {
+        /// The relative path the caller asked to open.
+        requested: PathBuf,
+    },
 
     /// `openat2(2)` is not available on this kernel (Linux < 5.6).
     ///
@@ -70,6 +92,7 @@ pub enum JailError {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     UnsupportedKernel {
+        /// The running kernel's version, when `/proc/sys/kernel/osrelease` was readable.
         version: Option<crate::openat2::KernelVersion>,
     },
 
@@ -78,7 +101,9 @@ pub enum JailError {
     /// was set. The type comes from `fstat` on the opened handle.
     #[cfg(all(feature = "guard", unix))]
     FileTypeRejected {
+        /// The relative path the caller asked to open.
         requested: PathBuf,
+        /// The type `fstat` reported for the opened handle.
         file_type: crate::guard::FileKind,
     },
 
@@ -86,7 +111,12 @@ pub enum JailError {
     /// [`OpenOptions::reject_hard_links`](crate::guard::OpenOptions::reject_hard_links)
     /// was set. The link count comes from `fstat` on the opened handle.
     #[cfg(all(feature = "guard", unix))]
-    HardLinkRejected { requested: PathBuf, nlink: u64 },
+    HardLinkRejected {
+        /// The relative path the caller asked to open.
+        requested: PathBuf,
+        /// The link count `fstat` reported for the opened handle.
+        nlink: u64,
+    },
 
     // ── Shared ────────────────────────────────────────────────────────────────
     /// Underlying I/O error.

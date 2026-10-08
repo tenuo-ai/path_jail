@@ -68,7 +68,8 @@ Footnotes:
    API falls back to an `O_NOFOLLOW` open with the protection of the
    `secure-open` column, and `Attestation::toctou_safe` is `false`. The
    handle policies (footnotes 3 and 7) work on every Unix target, because
-   they check the opened handle rather than the path.
+   they check the opened handle rather than the path. The full matrix is in
+   [README.md § Platform support](README.md#platform-support).
 1. `guard::FdJail` pins an `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` fd to the
    jail root at construction time. Subsequent renames or replacements of the
    root *path* do not affect the jail — all operations remain scoped to the

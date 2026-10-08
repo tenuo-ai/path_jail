@@ -1,0 +1,20 @@
+# Compiled copies of the examples in README.md and docs/guides/.
+#
+# Every `rust` code block in those files is either an `ANCHOR` region of a file
+# in `examples/` (checked byte-for-byte by scripts/check_doc_examples.py) or is
+# marked `rust,ignore` as an intentionally incomplete illustration. This crate
+# is never published and keeps its dependencies out of path_jail itself.
+[package]
+name = "path_jail-doc-examples"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+path_jail = { path = "..", features = ["secure-open", "guard"] }
+actix-web = { version = "4", default-features = false, features = ["macros"] }
+axum = { version = "0.8", default-features = false }
+bytes = "1"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
+
+[workspace]

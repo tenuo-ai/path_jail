@@ -16,6 +16,8 @@ exclude = [
     ".github/",       # CI config
     "tests/",         # integration tests (already excluded by cargo by default, explicit for clarity)
     "fuzz/",          # cargo-fuzz harness is tested from the repository, not shipped
+    "doc-examples/",  # compiled copies of the README/guide examples, built in CI
+    "scripts/",       # repository maintenance scripts
 ]
 
 [features]

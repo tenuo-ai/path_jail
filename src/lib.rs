@@ -82,10 +82,25 @@
 //! - Null byte injection (`file\x00.txt`)
 //! - Broken symlinks (cannot verify target)
 //!
-//! With `guard`: all of the above plus TOCTOU races, magic links
-//! (`/proc/self/fd`), and intermediate directory attacks (Linux 5.6+).
+//! With `guard` on Linux 5.6+ x86_64/aarch64: all of the above plus TOCTOU
+//! races, magic links (`/proc/self/fd`), and intermediate directory attacks.
+//! Other Unix targets get the `O_NOFOLLOW` fallback. Opt-in handle checks
+//! reject FIFOs, device nodes, and hard links on every Unix target.
 //!
-//! See [`Jail`] and [`guard::FdJail`] for details.
+//! # Choosing an API
+//!
+//! - [`Jail`] returns validated paths. Use it when only your service writes to
+//!   the tree.
+//! - `secure-open` adds `JailedFile`: validation, then an `O_NOFOLLOW` open.
+//! - `guard` adds `guard::FdJail`: descriptor-pinned opens that cannot be
+//!   raced where the kernel supports it.
+//!
+//! The README has the [platform support matrix](https://github.com/tenuo-ai/path_jail#platform-support), and
+//! [SECURITY.md](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against) maps each layer to the threats it does and does not
+//! stop. Guides: [migrating to the guard API](https://github.com/tenuo-ai/path_jail/blob/main/docs/guides/migrating.md)
+//! and [using it with Tokio](https://github.com/tenuo-ai/path_jail/blob/main/docs/guides/tokio.md).
+
+#![warn(missing_docs)]
 
 mod error;
 mod jail;
@@ -151,6 +166,10 @@ pub use open::JailedFile;
 /// std::fs::write(&safe, data)?;
 /// # Ok::<(), path_jail::JailError>(())
 /// ```
+///
+/// # Errors
+///
+/// The errors of [`Jail::new`] for `root`, then those of [`Jail::join`] for `path`.
 pub fn join<R, P>(root: R, path: P) -> Result<PathBuf, JailError>
 where
     R: AsRef<Path>,

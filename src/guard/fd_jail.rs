@@ -342,21 +342,31 @@ pub struct OpenOptions {
 }
 
 impl OpenOptions {
+    /// All flags off. An open with no access flag reads (`O_RDONLY`).
     pub fn new() -> Self {
         Self::default()
     }
+    /// Open for reading.
     pub fn read(mut self, v: bool) -> Self {
         self.read = v;
         self
     }
+    /// Open for writing. With [`read`](Self::read) this is `O_RDWR`.
     pub fn write(mut self, v: bool) -> Self {
         self.write = v;
         self
     }
+    /// Open in append mode (`O_APPEND`); implies write access.
     pub fn append(mut self, v: bool) -> Self {
         self.append = v;
         self
     }
+    /// Truncate an existing file to zero length. Requires [`write`](Self::write)
+    /// and cannot be combined with [`append`](Self::append).
+    ///
+    /// With a handle policy ([`require_regular_file`](Self::require_regular_file)
+    /// or [`reject_hard_links`](Self::reject_hard_links)) the truncate runs only
+    /// after the policy checks pass.
     pub fn truncate(mut self, v: bool) -> Self {
         self.truncate = v;
         self
@@ -1148,10 +1158,14 @@ fn libc_open_directory_flags() -> i32 {
     (O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) as i32
 }
 
-/// State held by the fd-first `Jail` extension (stored alongside the path-based Jail).
+/// A jail pinned to its root directory, for descriptor-returning operations.
 ///
-/// On Linux this holds an open `dirfd` pinned at `Jail::new` time; on other
-/// platforms we derive the root inode from `std::fs::metadata`.
+/// On Linux 5.6+ x86_64/aarch64, [`FdJail::new`] opens the root as a directory
+/// descriptor and every operation resolves beneath it with `openat2`, so
+/// renaming or replacing the root path afterwards does not move the jail. On
+/// other Unix targets it records the root's device and inode and uses the
+/// `O_NOFOLLOW` fallback; check [`Attestation::toctou_safe`]. See the
+/// [platform support matrix](https://github.com/tenuo-ai/path_jail#platform-support) and the [threat model](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against).
 ///
 /// # Thread safety
 ///
@@ -1234,6 +1248,14 @@ impl FdJail {
     /// requires kernel-enforced atomicity.** If `toctou_safe` is `false` and
     /// you need stronger guarantees, run on Linux 5.6+ or use OS-level
     /// isolation (container, chroot).
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidRoot`] if the root does not exist, is not a directory,
+    ///   is a filesystem root, or changed while it was being opened.
+    /// - `JailError::UnsupportedKernel` (Linux x86_64/aarch64 only) if `openat2` is
+    ///   missing or blocked by a seccomp/LSM policy. There is no fallback on those
+    ///   architectures.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, JailError> {
         let root_input = root.as_ref().to_path_buf();
         let root = root_input
@@ -1335,6 +1357,27 @@ impl FdJail {
     /// be `false`.
     ///
     /// Returns a [`GuardedFile`] containing both the open [`File`] and attestation data.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or an invalid
+    ///   flag combination (the same combinations `std::fs::OpenOptions` rejects).
+    /// - Linux openat2 path: [`JailError::Escape`] if resolution leaves the jail (or
+    ///   crosses a mount with `no_xdev`); [`JailError::SymlinkRejected`] for a
+    ///   symlink with `no_symlinks`, a symlink loop, or a magic link.
+    /// - Fallback: the errors of [`Jail::join`](crate::Jail::join), such as
+    ///   [`JailError::EscapedRoot`].
+    /// - [`JailError::FileTypeRejected`] / [`JailError::HardLinkRejected`] when a
+    ///   handle policy rejects the opened file (the handle is closed first).
+    /// - [`JailError::Io`] for OS errors (`NotFound`, `AlreadyExists`,
+    ///   `PermissionDenied`; `ENXIO` for a socket or a write-only FIFO with no reader).
+    ///
+    /// # Security
+    ///
+    /// Atomic and kernel-enforced only where `attestation().toctou_safe` is `true`
+    /// (Linux 5.6+ x86_64/aarch64). Hard links, FIFOs, and device nodes are not
+    /// blocked by `openat2`; opt in to the handle policies for untrusted trees. See
+    /// the [threat model](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against).
     pub fn open(
         &self,
         path: impl AsRef<Path>,
@@ -1361,6 +1404,11 @@ impl FdJail {
     /// Uses `O_CREAT | O_EXCL` — fails if the file already exists.
     /// The parent directory **must** already exist; this method does not create
     /// intermediate directories.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`open`](Self::open); `JailError::Io` with
+    /// `ErrorKind::AlreadyExists` if the name exists (including as a symlink).
     pub fn create(&self, path: impl AsRef<Path>) -> Result<GuardedFile, JailError> {
         self.open(path, OpenOptions::new().write(true).create_new(true))
     }
@@ -1370,6 +1418,14 @@ impl FdJail {
     /// Available on Linux x86_64/aarch64. The parent path is resolved with
     /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and pinned before
     /// `mkdirat(2)` executes, so concurrent parent renames cannot redirect it.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
+    ///   component that is empty, `.`, `..`, or ends in `/`.
+    /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if the parent path
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant).
+    /// - [`JailError::Io`] for OS errors, for example when the name already exists.
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1393,6 +1449,14 @@ impl FdJail {
     }
 
     /// Removes a non-directory entry beneath the pinned jail root.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
+    ///   component that is empty, `.`, `..`, or ends in `/`.
+    /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if the parent path
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant).
+    /// - [`JailError::Io`] for OS errors, for example when the entry does not exist or is a directory.
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1416,6 +1480,14 @@ impl FdJail {
     }
 
     /// Removes an empty directory beneath the pinned jail root.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
+    ///   component that is empty, `.`, `..`, or ends in `/`.
+    /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if the parent path
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant).
+    /// - [`JailError::Io`] for OS errors, for example when the directory does not exist or is not empty.
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1443,6 +1515,12 @@ impl FdJail {
     /// This has normal Linux rename semantics: an existing destination may be
     /// replaced. Both parent directories are independently pinned beneath the
     /// jail before `renameat2(2)` executes.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`create_dir`](Self::create_dir) for each of the two paths, plus
+    /// [`JailError::Io`] for OS errors (`EXDEV` across mounts, `ENOTEMPTY` when
+    /// replacing a non-empty directory).
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1488,6 +1566,14 @@ impl FdJail {
     /// eliminates atomically. Call `open` directly when you need to access the
     /// file — use `check_path` only when you need a safe string for a log
     /// entry, an error message, or an audit record.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path or a null byte.
+    /// - [`JailError::InvalidRoot`] if the root path no longer names the pinned directory.
+    /// - Linux openat2 path, existing paths: [`JailError::Escape`] /
+    ///   [`JailError::SymlinkRejected`], as for [`open`](Self::open).
+    /// - Otherwise the errors of [`Jail::join`](crate::Jail::join).
     pub fn check_path(&self, path: impl AsRef<Path>) -> Result<PathBuf, JailError> {
         use std::os::unix::fs::MetadataExt;
 
