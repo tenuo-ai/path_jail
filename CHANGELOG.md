@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exhaustion without the panic inherent in the `Clone` trait.
 - Scheduled fuzzing of arbitrary path bytes and a privileged bind-mount test
   for `RESOLVE_NO_XDEV`.
+- `OpenOptions::require_regular_file()` and `OpenOptions::reject_hard_links()`
+  handle policies for guarded opens, checked with `fstat` on the opened handle.
+  Failures return the new `JailError::FileTypeRejected` and
+  `JailError::HardLinkRejected` variants. With either policy set, the open uses
+  `O_NONBLOCK` so a FIFO in the jail cannot block the caller (cleared again
+  before the handle is returned, on every platform), `truncate` is deferred until the
+  policies pass (so an already hard-linked file is not emptied; the check is
+  point-in-time, not race-free), and directories are
+  exempt from the hard-link check. Guarded opens on Linux now pass `O_NOCTTY`.
+- `GuardedFile::opened_metadata()` and `GuardedFile::file_kind()` expose the
+  point-in-time metadata captured at open, with the new `guard::FileKind` enum.
 
 ### Fixed
 

@@ -73,6 +73,21 @@ pub enum JailError {
         version: Option<crate::openat2::KernelVersion>,
     },
 
+    /// The opened file is not a regular file and
+    /// [`OpenOptions::require_regular_file`](crate::guard::OpenOptions::require_regular_file)
+    /// was set. The type comes from `fstat` on the opened handle.
+    #[cfg(all(feature = "guard", unix))]
+    FileTypeRejected {
+        requested: PathBuf,
+        file_type: crate::guard::FileKind,
+    },
+
+    /// The opened file has more than one hard link and
+    /// [`OpenOptions::reject_hard_links`](crate::guard::OpenOptions::reject_hard_links)
+    /// was set. The link count comes from `fstat` on the opened handle.
+    #[cfg(all(feature = "guard", unix))]
+    HardLinkRejected { requested: PathBuf, nlink: u64 },
+
     // ── Shared ────────────────────────────────────────────────────────────────
     /// Underlying I/O error.
     Io(std::io::Error),
@@ -148,6 +163,23 @@ impl fmt::Display for JailError {
                 f,
                 "openat2 not available on this kernel (requires >= 5.6; \
                  kernel version unreadable)"
+            ),
+            #[cfg(all(feature = "guard", unix))]
+            Self::FileTypeRejected {
+                requested,
+                file_type,
+            } => write!(
+                f,
+                "'{}' is a {} (regular file required)",
+                requested.display(),
+                file_type
+            ),
+            #[cfg(all(feature = "guard", unix))]
+            Self::HardLinkRejected { requested, nlink } => write!(
+                f,
+                "'{}' has {} hard links (hard links rejected)",
+                requested.display(),
+                nlink
             ),
             Self::Io(err) => write!(f, "io error: {}", err),
         }

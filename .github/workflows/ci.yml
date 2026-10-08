@@ -44,7 +44,10 @@ jobs:
       - run: cargo build --all-features --verbose
       - run: cargo test --all-features --verbose
 
-  # Cross-compile and test on aarch64-linux (ARM servers, Raspberry Pi, etc.)
+  # Cross-compile and run the suite under QEMU user-mode emulation. The guard
+  # fallback and secure-open carry per-architecture O_* tables (O_NOFOLLOW,
+  # O_NONBLOCK, O_NOCTTY) and ELOOP values; QEMU translates guest flag values,
+  # so a wrong constant shows up as a failing test here.
   cross:
     runs-on: ubuntu-latest
     strategy:
@@ -59,6 +62,19 @@ jobs:
           # ARMv7 uses the guard fallback, so exercise every feature at runtime.
           - target: armv7-unknown-linux-gnueabihf
             test_args: --all-features
+          # 32-bit x86: asm-generic flags on a 32-bit target.
+          - target: i686-unknown-linux-gnu
+            test_args: --all-features
+          # PowerPC shares ARM's O_NOFOLLOW (0x8000); 32-bit big-endian.
+          - target: powerpc-unknown-linux-gnu
+            test_args: --all-features
+          - target: powerpc64le-unknown-linux-gnu
+            test_args: --all-features
+          - target: riscv64gc-unknown-linux-gnu
+            test_args: --all-features
+          # 64-bit big-endian: also checks attestation encoding is LE-fixed.
+          - target: s390x-unknown-linux-gnu
+            test_args: --all-features
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
@@ -68,6 +84,56 @@ jobs:
         run: cross build --all-features --target ${{ matrix.target }} --verbose
       - name: Test
         run: cross test ${{ matrix.test_args }} --target ${{ matrix.target }} --verbose
+
+  # Compile and lint every feature for targets CI cannot run. `check` needs only
+  # the target's std (no linker), which covers the per-OS cfg branches.
+  check-targets:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            features: --all-features
+          - target: x86_64-unknown-freebsd
+            features: --all-features
+          - target: x86_64-unknown-netbsd
+            features: --all-features
+          - target: loongarch64-unknown-linux-gnu
+            features: --all-features
+          # SPARC has its own O_NONBLOCK/O_NOCTTY values and ELOOP = 62. Runtime
+          # tests are not possible with cross 0.2.5: its sparc64 image's glibc
+          # predates getrandom, which current std links against.
+          - target: sparc64-unknown-linux-gnu
+            features: --all-features
+          # guard and secure-open refuse to build on illumos (unknown O_* ABI);
+          # check the path-only API, including its illumos ELOOP branch.
+          - target: x86_64-unknown-illumos
+            features: ""
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - run: cargo clippy ${{ matrix.features }} --all-targets --target ${{ matrix.target }} -- -D warnings
+
+  # Run the full suite on a real FreeBSD kernel: the BSD fallback (O_NOFOLLOW,
+  # O_NONBLOCK = 0x4, ELOOP = 62, extern fcntl) executes here.
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Test on FreeBSD 14
+        uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3 # v1.5.7
+        with:
+          release: "14"
+          usesh: true
+          prepare: |
+            pkg install -y rust
+          run: |
+            rustc --version
+            cargo test --all-features --verbose
 
   # Native AArch64 runner: the cross/QEMU job above cannot execute openat2,
   # so this is where the guard feature's aarch64 flags and syscalls run for real.

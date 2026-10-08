@@ -42,6 +42,7 @@ use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MI
 pub struct GuardedFile {
     pub(crate) file: File,
     pub(crate) attestation: Attestation,
+    pub(crate) metadata: std::fs::Metadata,
 }
 
 impl GuardedFile {
@@ -60,12 +61,28 @@ impl GuardedFile {
         &self.attestation
     }
 
+    /// Returns the metadata captured by `fstat` on this handle at open time.
+    ///
+    /// This is the snapshot that the [`OpenOptions`] file-type and hard-link
+    /// policies were checked against. It is point-in-time: the file can be
+    /// changed, re-linked or truncated afterwards. Call
+    /// [`File::metadata`] (through `Deref`) for a fresh `fstat`.
+    pub fn opened_metadata(&self) -> &std::fs::Metadata {
+        &self.metadata
+    }
+
+    /// Returns the file type of the opened handle, from [`opened_metadata`](Self::opened_metadata).
+    pub fn file_kind(&self) -> FileKind {
+        FileKind::from_metadata(&self.metadata)
+    }
+
     /// Returns `true` if the file has more than one hard link.
     ///
-    /// Hard links cannot be detected before the file is opened. If your
-    /// security policy prohibits hard links (e.g., to prevent data exfiltration
-    /// via a link to a sensitive file inside the jail), check this *before*
-    /// reading or writing:
+    /// Hard links cannot be detected before the file is opened. To enforce a
+    /// no-hard-links policy, prefer [`OpenOptions::reject_hard_links`], which
+    /// checks the handle before returning it and defers truncation until the
+    /// check passes. Checking afterwards works for reads but cannot undo an
+    /// `O_TRUNC` that already hit the linked file:
     ///
     /// ```no_run
     /// # use path_jail::guard::{FdJail, OpenOptions};
@@ -320,6 +337,8 @@ pub struct OpenOptions {
     pub(crate) create_new: bool,
     pub(crate) no_symlinks: bool,
     pub(crate) no_xdev: bool,
+    pub(crate) require_regular_file: bool,
+    pub(crate) reject_hard_links: bool,
 }
 
 impl OpenOptions {
@@ -375,6 +394,81 @@ impl OpenOptions {
         self
     }
 
+    /// Require the opened handle to be a regular file.
+    ///
+    /// A non-regular file that the OS lets us open (a directory, a FIFO opened
+    /// for reading, a block or character device) fails with
+    /// [`JailError::FileTypeRejected`]. The check uses `fstat` on the opened
+    /// handle, so it cannot be raced by swapping the path afterwards.
+    ///
+    /// Some special files never yield a handle to check: opening a socket, or
+    /// a write-only open of a FIFO with no reader, fails inside the kernel
+    /// (`ENXIO` on Linux) and surfaces as [`JailError::Io`]. Either way no
+    /// handle is returned, but match on both variants if you need to tell
+    /// "rejected special file" apart from other errors.
+    ///
+    /// While any handle policy is set, the open uses `O_NONBLOCK` so a FIFO
+    /// planted in the jail cannot block the caller waiting for a peer. The
+    /// flag is cleared again before the handle is returned, so callers always
+    /// get an ordinary blocking descriptor.
+    ///
+    /// Opening a device node can have driver side effects before it is
+    /// rejected (guarded opens always pass `O_NOCTTY`, so a terminal never
+    /// becomes the caller's controlling tty); device nodes need `CAP_MKNOD` to
+    /// create, so this mainly matters if the jail tree is shared with
+    /// privileged processes.
+    pub fn require_regular_file(mut self, v: bool) -> Self {
+        self.require_regular_file = v;
+        self
+    }
+
+    /// Reject a handle whose file has more than one hard link.
+    ///
+    /// A hard link inside the jail can point at an inode that also lives
+    /// outside it, and `openat2(RESOLVE_BENEATH)` cannot see that: hard links
+    /// are not symlinks. With this set, an `nlink > 1` file fails with
+    /// [`JailError::HardLinkRejected`]. When combined with
+    /// [`truncate`](Self::truncate), truncation is deferred until the check
+    /// passes, so a file that is already hard-linked when it is opened is not
+    /// emptied.
+    ///
+    /// This does not make truncation race-free: a process that adds a hard
+    /// link between the check and the deferred `ftruncate` still sees the file
+    /// emptied, and nothing can undo that afterwards. If a concurrent re-link
+    /// is in your threat model, do not truncate in place; write a new file and
+    /// rename it over the destination instead.
+    ///
+    /// Directories are exempt: they always report `nlink >= 2` and cannot be
+    /// hard-linked. The open is non-blocking as described under
+    /// [`require_regular_file`](Self::require_regular_file), so a FIFO cannot
+    /// hang the caller.
+    ///
+    /// The link count is a point-in-time `fstat` sample. A process that already
+    /// holds the outside file open can drop its outside name before the check
+    /// and re-link it afterwards (e.g. `linkat` on `/proc/self/fd/N`). On Linux,
+    /// `fs.protected_hardlinks=1` (the default on most distributions) limits
+    /// which files an unprivileged user can hard-link in the first place.
+    pub fn reject_hard_links(mut self, v: bool) -> Self {
+        self.reject_hard_links = v;
+        self
+    }
+
+    fn has_handle_policy(&self) -> bool {
+        self.require_regular_file || self.reject_hard_links
+    }
+
+    /// Open non-blocking whenever a handle policy is active, so a FIFO is
+    /// checked instead of blocking the open until a peer appears.
+    fn open_nonblocking(&self) -> bool {
+        self.has_handle_policy()
+    }
+
+    /// `O_TRUNC` takes effect inside `open`, before any handle check. When a
+    /// handle policy is active, truncation is applied afterwards instead.
+    fn truncate_at_open(&self) -> bool {
+        self.truncate && !self.has_handle_policy()
+    }
+
     fn validate(&self) -> Result<(), JailError> {
         let can_write = self.write || self.append;
         if (self.create || self.create_new) && !can_write {
@@ -394,6 +488,121 @@ impl OpenOptions {
         }
         Ok(())
     }
+}
+
+// ── Handle policies ───────────────────────────────────────────────────────────
+
+/// File type of an opened guard handle, from `fstat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FileKind {
+    /// A regular file.
+    Regular,
+    /// A directory.
+    Directory,
+    /// A symbolic link (only observable via `O_PATH`-style handles).
+    Symlink,
+    /// A named pipe (FIFO).
+    Fifo,
+    /// A Unix domain socket.
+    Socket,
+    /// A block device.
+    BlockDevice,
+    /// A character device.
+    CharDevice,
+    /// A type this crate does not recognize.
+    Unknown,
+}
+
+impl FileKind {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::FileTypeExt;
+        let ft = meta.file_type();
+        if ft.is_file() {
+            Self::Regular
+        } else if ft.is_dir() {
+            Self::Directory
+        } else if ft.is_symlink() {
+            Self::Symlink
+        } else if ft.is_fifo() {
+            Self::Fifo
+        } else if ft.is_socket() {
+            Self::Socket
+        } else if ft.is_block_device() {
+            Self::BlockDevice
+        } else if ft.is_char_device() {
+            Self::CharDevice
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+impl std::fmt::Display for FileKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Regular => "regular file",
+            Self::Directory => "directory",
+            Self::Symlink => "symlink",
+            Self::Fifo => "FIFO",
+            Self::Socket => "socket",
+            Self::BlockDevice => "block device",
+            Self::CharDevice => "character device",
+            Self::Unknown => "file of unknown type",
+        })
+    }
+}
+
+/// Shared tail of every guarded open: `fstat` the handle, enforce the
+/// handle policies, then apply a deferred truncate. Any failure drops (closes)
+/// the file, so a rejected handle is never returned.
+fn finish_open(
+    file: File,
+    jail_root: &Path,
+    root_inode: u64,
+    rel_path: &Path,
+    opts: &OpenOptions,
+    toctou_safe: bool,
+) -> Result<GuardedFile, JailError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata().map_err(JailError::Io)?;
+    if opts.require_regular_file && !metadata.file_type().is_file() {
+        return Err(JailError::FileTypeRejected {
+            requested: rel_path.to_path_buf(),
+            file_type: FileKind::from_metadata(&metadata),
+        });
+    }
+    if opts.reject_hard_links && !metadata.file_type().is_dir() && metadata.nlink() > 1 {
+        return Err(JailError::HardLinkRejected {
+            requested: rel_path.to_path_buf(),
+            nlink: metadata.nlink(),
+        });
+    }
+    let metadata = if opts.truncate && !opts.truncate_at_open() {
+        file.set_len(0).map_err(JailError::Io)?;
+        file.metadata().map_err(JailError::Io)?
+    } else {
+        metadata
+    };
+
+    let attestation = Attestation {
+        jail_root: jail_root.to_path_buf(),
+        opened_path: rel_path.to_path_buf(),
+        root_inode,
+        file_inode: metadata.ino(),
+        device: metadata.dev(),
+        nlink: metadata.nlink(),
+        toctou_safe,
+        opened_at: SystemTime::now(),
+        signature: None,
+    };
+
+    Ok(GuardedFile {
+        file,
+        attestation,
+        metadata,
+    })
 }
 
 // ── ResolveOptions ────────────────────────────────────────────────────────────
@@ -441,13 +650,13 @@ impl ResolveOptions {
 mod linux_impl {
     use super::*;
     use crate::openat2::{
-        mkdirat, openat2, renameat2, unlinkat, Errno, OpenHow, AT_REMOVEDIR, O_APPEND, O_CLOEXEC,
-        O_CREAT, O_DIRECTORY, O_EXCL, O_PATH, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, RESOLVE_BENEATH,
-        RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
+        clear_nonblock, mkdirat, openat2, renameat2, unlinkat, Errno, OpenHow, AT_REMOVEDIR,
+        O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY,
+        O_RDWR, O_TRUNC, O_WRONLY, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
+        RESOLVE_NO_XDEV,
     };
     use std::ffi::CString;
-    use std::os::unix::fs::MetadataExt;
-    use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+    use std::os::unix::io::{AsRawFd, OwnedFd};
 
     /// Implementation of [`FdJail::open`] on Linux using `openat2`.
     pub(crate) fn jail_open(
@@ -464,7 +673,9 @@ mod linux_impl {
 
         // Build the access mode independently from O_APPEND. This matches
         // std::fs::OpenOptions: read+write/append means O_RDWR, not O_WRONLY.
-        let mut flags: u64 = O_CLOEXEC;
+        // O_NOCTTY: a tty reached through the jail must never become the
+        // caller's controlling terminal.
+        let mut flags: u64 = O_CLOEXEC | O_NOCTTY;
         let wants_write = opts.write || opts.append;
         flags |= match (opts.read, wants_write) {
             (true, true) => O_RDWR,
@@ -480,8 +691,11 @@ mod linux_impl {
         if opts.create_new {
             flags |= O_CREAT | O_EXCL;
         }
-        if opts.truncate {
+        if opts.truncate_at_open() {
             flags |= O_TRUNC;
+        }
+        if opts.open_nonblocking() {
+            flags |= O_NONBLOCK;
         }
 
         // Build RESOLVE_* flags
@@ -506,25 +720,14 @@ mod linux_impl {
         let owned_fd = openat2(dirfd.as_raw_fd(), &cpath, &how)
             .map_err(|e| map_errno_to_jail_error(e, rel_path))?;
 
-        // Read attestation fields via File::metadata — uses std's portable stat
-        // wrapper and avoids arch-specific struct stat layouts. The fd ownership
-        // moves into File so it closes when the JailFile drops.
-        let file: File = unsafe { File::from_raw_fd(owned_fd.into_raw_fd()) };
-        let meta = file.metadata().map_err(JailError::Io)?;
-
-        let attestation = Attestation {
-            jail_root: jail_root.to_path_buf(),
-            opened_path: rel_path.to_path_buf(),
-            root_inode,
-            file_inode: meta.ino(),
-            device: meta.dev(),
-            nlink: meta.nlink(),
-            toctou_safe: true,
-            opened_at: SystemTime::now(),
-            signature: None,
-        };
-
-        Ok(GuardedFile { file, attestation })
+        // The fd ownership moves into File so it closes on drop, including
+        // when a handle policy rejects it.
+        let file: File = File::from(owned_fd);
+        let guarded = finish_open(file, jail_root, root_inode, rel_path, opts, true)?;
+        if opts.open_nonblocking() {
+            clear_nonblock(guarded.file.as_raw_fd()).map_err(|e| JailError::Io(e.into()))?;
+        }
+        Ok(guarded)
     }
 
     fn map_errno_to_jail_error(e: Errno, path: &Path) -> JailError {
@@ -775,6 +978,109 @@ mod fallback_impl {
     ))]
     compile_error!("path_jail guard: O_NOFOLLOW is unknown for this Linux architecture");
 
+    // O_NOCTTY: only Linux acquires a controlling tty on open(2); macOS/BSD
+    // need an explicit TIOCSCTTY, so the flag is not needed there.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6"
+        )
+    ))]
+    const O_NOCTTY: i32 = 0x800;
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    const O_NOCTTY: i32 = 0x8000;
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    const O_NOCTTY: i32 = 0o400;
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const O_NOCTTY: i32 = 0;
+
+    // O_NONBLOCK also varies: MIPS and SPARC keep their historical values; every
+    // other Linux arch above uses the asm-generic 0o4000; macOS/BSD use 0x4.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6"
+        )
+    ))]
+    const O_NONBLOCK: i32 = 0x80;
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    const O_NONBLOCK: i32 = 0x4000;
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    const O_NONBLOCK: i32 = 0o4000;
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const O_NONBLOCK: i32 = 0x0004;
+
+    // `fcntl` comes from the platform C library that std already links on
+    // every Unix target, so this adds no crate dependency. F_GETFL/F_SETFL are
+    // 3/4 on Linux (all architectures), macOS and the BSDs.
+    extern "C" {
+        fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+    }
+    const F_GETFL: std::os::raw::c_int = 3;
+    const F_SETFL: std::os::raw::c_int = 4;
+
+    fn clear_nonblock(file: &File) -> std::io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` is owned by `file` for the duration of both calls, and
+        // F_GETFL/F_SETFL take no pointer arguments.
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if flags & O_NONBLOCK == 0 {
+            return Ok(());
+        }
+        if unsafe { fcntl(fd, F_SETFL, flags & !O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub(crate) fn jail_open(
         jail_root: &Path,
         root_inode: u64,
@@ -797,7 +1103,7 @@ mod fallback_impl {
         if opts.append {
             oo.append(true);
         }
-        if opts.truncate {
+        if opts.truncate_at_open() {
             oo.truncate(true);
         }
         if opts.create {
@@ -809,27 +1115,19 @@ mod fallback_impl {
         if !opts.read && !opts.write && !opts.append {
             oo.read(true);
         }
-        oo.custom_flags(O_NOFOLLOW);
+        let mut custom_flags = O_NOFOLLOW | O_NOCTTY;
+        if opts.open_nonblocking() {
+            custom_flags |= O_NONBLOCK;
+        }
+        oo.custom_flags(custom_flags);
 
         let file = oo.open(&abs_path).map_err(JailError::Io)?;
-
-        // fstat via std::fs::metadata on the file
-        let meta = file.metadata().map_err(JailError::Io)?;
-        use std::os::unix::fs::MetadataExt;
-
-        let attestation = Attestation {
-            jail_root: jail_root.to_path_buf(),
-            opened_path: rel_path.to_path_buf(),
-            root_inode,
-            file_inode: meta.ino(),
-            device: meta.dev(),
-            nlink: meta.nlink(),
-            toctou_safe: false, // macOS fallback is not TOCTOU-safe
-            opened_at: SystemTime::now(),
-            signature: None,
-        };
-
-        Ok(GuardedFile { file, attestation })
+        // The fallback is not TOCTOU-safe.
+        let guarded = finish_open(file, jail_root, root_inode, rel_path, opts, false)?;
+        if opts.open_nonblocking() {
+            clear_nonblock(&guarded.file).map_err(JailError::Io)?;
+        }
+        Ok(guarded)
     }
 }
 
