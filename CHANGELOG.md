@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Correct `O_NOFOLLOW` on Linux/Android architectures using the guard fallback;
-  the previous macOS/BSD constant could silently follow a final symlink.
+- Correct architecture-specific `O_NOFOLLOW` values on Linux/Android in both
+  `secure-open` and the guard fallback; incorrect constants could silently
+  follow a final symlink on ARM-family targets.
 - `FdJail::check_path()` now performs a point-in-time path containment check and
   rejects traversal and symlink escapes.
 - Linux `OpenOptions` now handles read+write as `O_RDWR` and rejects invalid

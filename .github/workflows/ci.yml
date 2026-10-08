@@ -50,9 +50,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
+        include:
+          # cross's QEMU runner does not implement openat2. Compile every
+          # feature on AArch64, but run its secure-open suite without guard.
+          - target: aarch64-unknown-linux-gnu
+            test_args: --features secure-open
+          # ARMv7 uses the guard fallback, so exercise every feature at runtime.
+          - target: armv7-unknown-linux-gnueabihf
+            test_args: --all-features
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
@@ -61,7 +66,7 @@ jobs:
       - name: Build
         run: cross build --all-features --target ${{ matrix.target }} --verbose
       - name: Test
-        run: cross test --all-features --target ${{ matrix.target }} --verbose
+        run: cross test ${{ matrix.test_args }} --target ${{ matrix.target }} --verbose
 
   clippy:
     runs-on: ubuntu-latest

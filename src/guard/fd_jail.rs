@@ -587,7 +587,37 @@ mod fallback_impl {
     // O_NOFOLLOW differs between the Linux ABI and macOS/BSD. This fallback
     // also serves Linux architectures without an openat2 asm shim, so using
     // the Darwin value unconditionally would silently follow final symlinks.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
+    ))]
+    const O_NOFOLLOW: i32 = 0x8000;
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "csky",
+            target_arch = "hexagon",
+            target_arch = "loongarch64",
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "s390x",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        )
+    ))]
     const O_NOFOLLOW: i32 = 0o0400000;
 
     #[cfg(any(
@@ -611,6 +641,32 @@ mod fallback_impl {
     compile_error!(
         "path_jail guard: O_NOFOLLOW is unknown for this Unix target; refusing to build an unsafe fallback"
     );
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k",
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "csky",
+            target_arch = "hexagon",
+            target_arch = "loongarch64",
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "s390x",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    compile_error!("path_jail guard: O_NOFOLLOW is unknown for this Linux architecture");
 
     pub(crate) fn jail_open(
         jail_root: &Path,

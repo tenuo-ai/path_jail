@@ -21,8 +21,40 @@ use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-// O_NOFOLLOW values by platform (from POSIX/system headers)
-#[cfg(target_os = "linux")]
+// O_NOFOLLOW values by platform and architecture (from system headers).
+// Linux uses the asm-generic value on several architectures, but ARM,
+// AArch64, PowerPC, and m68k retain the older value.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "m68k"
+    )
+))]
+const O_NOFOLLOW: i32 = 0x8000;
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "csky",
+        target_arch = "hexagon",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64"
+    )
+))]
 const O_NOFOLLOW: i32 = 0o0400000;
 
 #[cfg(target_os = "macos")]
@@ -45,6 +77,7 @@ const O_NOFOLLOW: i32 = 0x0100;
 // protection, which is a security bug. Fail loudly instead.
 #[cfg(not(any(
     target_os = "linux",
+    target_os = "android",
     target_os = "macos",
     target_os = "freebsd",
     target_os = "openbsd",
@@ -58,6 +91,32 @@ compile_error!(
      with your target triple and the correct O_NOFOLLOW value from your \
      system headers."
 );
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "m68k",
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "csky",
+        target_arch = "hexagon",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64"
+    ))
+))]
+compile_error!("path_jail secure-open: O_NOFOLLOW is not known for this Linux architecture");
 
 /// A file opened with TOCTOU-safe semantics.
 ///
