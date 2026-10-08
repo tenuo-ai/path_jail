@@ -401,12 +401,9 @@ impl OpenOptions {
     /// opened handle, so it cannot be raced by swapping the path afterwards.
     ///
     /// While any handle policy is set, the open uses `O_NONBLOCK` so a FIFO
-    /// planted in the jail cannot block the caller waiting for a peer. On
-    /// Linux x86_64/aarch64 the flag is cleared again before the handle is
-    /// returned. On the fallback (macOS/BSD and other Linux architectures) the
-    /// returned handle stays non-blocking, which is a no-op for regular files
-    /// on local filesystems but can surface `EAGAIN` on some FUSE or network
-    /// filesystems.
+    /// planted in the jail cannot block the caller waiting for a peer. The
+    /// flag is cleared again before the handle is returned, so callers always
+    /// get an ordinary blocking descriptor.
     ///
     /// A write-only open of a FIFO with no reader, or an open of a socket,
     /// fails in the kernel with `ENXIO` and surfaces as [`JailError::Io`].
@@ -1045,6 +1042,33 @@ mod fallback_impl {
     ))]
     const O_NONBLOCK: i32 = 0x0004;
 
+    // `fcntl` comes from the platform C library that std already links on
+    // every Unix target, so this adds no crate dependency. F_GETFL/F_SETFL are
+    // 3/4 on Linux (all architectures), macOS and the BSDs.
+    extern "C" {
+        fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+    }
+    const F_GETFL: std::os::raw::c_int = 3;
+    const F_SETFL: std::os::raw::c_int = 4;
+
+    fn clear_nonblock(file: &File) -> std::io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` is owned by `file` for the duration of both calls, and
+        // F_GETFL/F_SETFL take no pointer arguments.
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if flags & O_NONBLOCK == 0 {
+            return Ok(());
+        }
+        if unsafe { fcntl(fd, F_SETFL, flags & !O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub(crate) fn jail_open(
         jail_root: &Path,
         root_inode: u64,
@@ -1080,8 +1104,6 @@ mod fallback_impl {
             oo.read(true);
         }
         let mut custom_flags = O_NOFOLLOW | O_NOCTTY;
-        // No fcntl without libc here, so the handle stays non-blocking; see
-        // `OpenOptions::require_regular_file`.
         if opts.open_nonblocking() {
             custom_flags |= O_NONBLOCK;
         }
@@ -1089,7 +1111,11 @@ mod fallback_impl {
 
         let file = oo.open(&abs_path).map_err(JailError::Io)?;
         // The fallback is not TOCTOU-safe.
-        finish_open(file, jail_root, root_inode, rel_path, opts, false)
+        let guarded = finish_open(file, jail_root, root_inode, rel_path, opts, false)?;
+        if opts.open_nonblocking() {
+            clear_nonblock(&guarded.file).map_err(JailError::Io)?;
+        }
+        Ok(guarded)
     }
 }
 

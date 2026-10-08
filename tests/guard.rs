@@ -1138,11 +1138,35 @@ fn reject_hard_links_alone_does_not_block_on_fifo() {
     assert_eq!(kind, Some(FileKind::Fifo));
 }
 
-#[test]
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+#[cfg(unix)]
+extern "C" {
+    fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+}
+
+/// `O_NONBLOCK` for the hosts CI runs the guard suite on.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
 ))]
+const TEST_O_NONBLOCK: std::os::raw::c_int = 0x0004;
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "sparc",
+        target_arch = "sparc64"
+    ))
+))]
+const TEST_O_NONBLOCK: std::os::raw::c_int = 0o4000;
+
+#[test]
+#[cfg(unix)]
 fn handle_policies_return_a_blocking_descriptor() {
     use std::os::unix::io::AsRawFd;
 
@@ -1159,12 +1183,12 @@ fn handle_policies_return_a_blocking_descriptor() {
         )
         .unwrap();
 
-    // fdinfo reports the open file status flags in octal; O_NONBLOCK is 0o4000.
-    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd())).unwrap();
-    let flags = info
-        .lines()
-        .find_map(|line| line.strip_prefix("flags:"))
-        .map(|v| u64::from_str_radix(v.trim(), 8).unwrap())
-        .expect("flags line in fdinfo");
-    assert_eq!(flags & 0o4000, 0, "O_NONBLOCK leaked to caller: {flags:o}");
+    // F_GETFL is 3 on Linux, macOS and the BSDs.
+    let flags = unsafe { fcntl(file.as_raw_fd(), 3) };
+    assert!(flags >= 0, "fcntl(F_GETFL) failed");
+    assert_eq!(
+        flags & TEST_O_NONBLOCK,
+        0,
+        "O_NONBLOCK leaked to caller: {flags:#o}"
+    );
 }
