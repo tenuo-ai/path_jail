@@ -78,7 +78,10 @@ let path2 = jail.join("data.csv")?;
 
 ### Limitations
 
-This library validates paths. It does not hold file descriptors.
+The path-based `Jail` API validates paths; it does not hold file descriptors,
+so the limitations below apply to it. The `guard` feature's `FdJail` pins the
+root as a descriptor and closes several of them (see
+[TOCTOU-Safe File Operations](#toctou-safe-file-operations)).
 
 **Rejected at construction:**
 - Filesystem roots (`/`, `C:\`, `\\server\share`) are rejected because they defeat the purpose of jailing.
@@ -328,12 +331,13 @@ use path_jail::{Jail, JailError};
 
 match Jail::new("/var/uploads") {
     Ok(jail) => { /* use jail */ }
-    Err(JailError::InvalidRoot(path)) => {
+    Err(JailError::InvalidRoot { path, .. }) => {
         // Tried to use filesystem root (/, C:\) or non-directory
         panic!("Config error: {}", path.display());
     }
     Err(JailError::Io(e)) => {
-        // Root doesn't exist
+        // Root doesn't exist or can't be canonicalized. (`guard::FdJail::new`
+        // reports this case as `InvalidRoot` with `source: Some(e)` instead.)
         panic!("Config error: {}", e);
     }
     Err(e) => panic!("Unexpected error: {}", e),  // Future-proof
@@ -375,8 +379,12 @@ match jail.join(user_input) {
 
 ## Example: File Uploads
 
-With the `guard` feature, resolution and open happen in one kernel-checked
-step, so nothing can swap a symlink in between:
+This example targets **Linux 5.6+ on x86_64/aarch64**, where the `guard`
+feature resolves and opens in one `openat2` call, so nothing can swap a
+symlink in between. On macOS/BSD and other Linux architectures, `FdJail::open`
+falls back to a non-atomic `O_NOFOLLOW` open (`attestation().toctou_safe` is
+`false`) and `create_dir` does not exist; drop the `create_dir` call and
+pre-create user directories there.
 
 ```rust
 use path_jail::guard::{FdJail, OpenOptions};
@@ -434,8 +442,11 @@ otherwise.
 ## Framework Integration
 
 These examples use the `guard` feature
-(`path_jail = { version = "0.5", features = ["guard"] }`). Guarded opens and
-writes are blocking calls, so they run off the async executor.
+(`path_jail = { version = "0.5", features = ["guard"] }`) and compile on any
+Unix. The open is atomic and kernel-enforced on Linux 5.6+ x86_64/aarch64; on
+other Unix targets it uses the `O_NOFOLLOW` fallback, which protects only the
+final component. Guarded opens and writes are blocking calls, so they run off
+the async executor.
 
 ### Axum
 
@@ -642,15 +653,15 @@ pathname-based fallback would reintroduce the race they are designed to avoid.
 | | path_jail | strict-path | cap-std |
 |-|-----------|-------------|---------|
 | Approach | Path validation + guard | Type-safe path system | File descriptors |
-| Returns | `PathBuf` / `JailedPath` / `JailFile` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
+| Returns | `PathBuf` / `JailedPath` / `GuardedFile` | Custom `StrictPath<T>` | Custom `Dir`/`File` |
 | Dependencies | 0 | ~5 | ~10 |
-| TOCTOU-safe | `guard` (Linux 5.6+, kernel-enforced) / `secure-open` (final component, all Unix) | No | Yes |
+| TOCTOU-safe | `guard` (Linux 5.6+ x86_64/aarch64, kernel-enforced) / `secure-open` (final component, all Unix) | No | Yes |
 | Best for | File sandboxing with optional kernel enforcement | Complex type-safe paths | Full capability-based security |
 
 - [`strict-path`](https://crates.io/crates/strict-path) - More comprehensive, uses marker types for compile-time guarantees
 - [`cap-std`](https://docs.rs/cap-std) - Capability-based, TOCTOU-safe, but replaces `std::fs` entirely
 
-*`guard` on Linux 5.6+: the validate-and-open is a single `openat2` syscall — truly atomic, no race window. On macOS/BSD the same API falls back to `O_NOFOLLOW` (final component only).*
+*`guard` on Linux 5.6+ x86_64/aarch64: the validate-and-open is a single `openat2` syscall — truly atomic, no race window. On macOS/BSD and other Linux architectures the same API falls back to `O_NOFOLLOW` (final component only).*
 
 ## Thread Safety
 

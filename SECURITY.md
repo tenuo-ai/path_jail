@@ -43,7 +43,7 @@ you need a process-level sandbox (`seccomp`, `landlock`, containers, VMs).
 `path_jail` ships three API layers with different security/ergonomics
 tradeoffs. Pick the strongest one your environment supports.
 
-| Threat                                        | `Jail` (default) | `secure-open` | `guard` (Linux 5.6+) |
+| Threat                                        | `Jail` (default) | `secure-open` | `guard` (Linux 5.6+, x86_64/aarch64)⁰ |
 |-----------------------------------------------|:---:|:---:|:---:|
 | Path traversal via `..`                       | ✅  | ✅  | ✅                  |
 | Absolute path injection (`/etc/passwd`)       | ✅  | ✅  | ✅                  |
@@ -55,6 +55,7 @@ tradeoffs. Pick the strongest one your environment supports.
 | Concurrent rename of jail root mid-operation  | ❌  | ❌  | ✅¹                 |
 | Magic links (`/proc/self/fd`, `/proc/self/root`) | ❌  | ❌  | ✅                  |
 | Hard link to sensitive content (detect)       | ❌² | ❌² | ✅³                 |
+| FIFO / device node opened as data (opt-in)    | ❌  | ❌  | ✅⁷                 |
 | Bind-mount escape (opt-in)                    | ❌  | ❌  | ✅⁴                 |
 | Atomic open with kernel-enforced containment  | ❌  | ❌  | ✅                  |
 | Atomic fd-relative create/remove/rename       | ❌  | ❌  | ✅⁶                 |
@@ -62,16 +63,28 @@ tradeoffs. Pick the strongest one your environment supports.
 
 Footnotes:
 
+0. The `guard` column describes the `openat2` path, used on Linux 5.6+ on
+   x86_64 and aarch64. On macOS/BSD and other Linux architectures the same
+   API falls back to an `O_NOFOLLOW` open with the protection of the
+   `secure-open` column, and `Attestation::toctou_safe` is `false`. The
+   handle policies (footnotes 3 and 7) work on every Unix target, because
+   they check the opened handle rather than the path.
 1. `guard::FdJail` pins an `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` fd to the
    jail root at construction time. Subsequent renames or replacements of the
    root *path* do not affect the jail — all operations remain scoped to the
    original directory inode.
 2. Hard links are not detectable in user space before open. The path-based
    APIs do not stat the opened file and so cannot surface `nlink`.
-3. `guard::JailFile::has_hard_links()` exposes `nlink > 1` from the post-open
-   `fstat`. **Policy is the caller's responsibility** — a content-addressed
-   store may legitimately use hard links. If your policy rejects hard links,
-   check `has_hard_links()` **before** reading or writing.
+3. Opt in with `OpenOptions::reject_hard_links(true)`: the open fails with
+   `JailError::HardLinkRejected` when the opened handle's `fstat` reports
+   `nlink > 1` (directories are exempt), and a requested `truncate` is
+   deferred until the check passes. Off by default because a
+   content-addressed store may legitimately use hard links;
+   `GuardedFile::has_hard_links()` remains for callers that apply their own
+   policy after open. The check is point-in-time: a process that already
+   holds the outside file can re-link it after the check, so do not rely on
+   in-place truncation when that race matters (write a new file and rename
+   it instead).
 4. Opt in with `OpenOptions::no_xdev(true)` (maps to `RESOLVE_NO_XDEV`).
    Off by default to preserve directory-tree containment semantics, which
    are what most callers want.
@@ -88,6 +101,12 @@ Footnotes:
    on Linux x86_64/aarch64. They pin parent directories beneath the jail before
    issuing fd-relative mutation syscalls. They are omitted on fallback targets
    rather than exposing a racy pathname implementation.
+7. Opt in with `OpenOptions::require_regular_file(true)`: a directory, FIFO
+   or device node that the OS lets us open fails with
+   `JailError::FileTypeRejected`, and the open is non-blocking so a FIFO
+   cannot hang the caller. Sockets and write-only FIFOs without a reader fail
+   inside the kernel and return `JailError::Io`. Opening a device node can
+   still trigger driver side effects before it is rejected.
 
 ---
 
@@ -107,7 +126,8 @@ These threats are documented as **not defended** by any API:
   input on every iteration.
 - **Windows.** No Windows-specific protections are implemented. `Jail` and
   `secure-open` compile on Windows but provide no defenses beyond the
-  cross-platform path-string checks; `guard` is Linux-only.
+  cross-platform path-string checks; the `guard` module is Unix-only and is
+  not compiled on Windows.
 - **Unicode normalization.** Paths are accepted byte-for-byte. We do not
   normalize NFC/NFD on macOS or fold case on Windows/macOS. If your storage
   layer is case-insensitive, treat `Report.PDF` and `report.pdf` as
@@ -132,9 +152,10 @@ process, on Unix, and need    │ Protects final-component swaps.  │
 final-component TOCTOU →      └──────────────────────────────────┘
 
                               ┌──────────────────────────────────┐
-Security-critical opens on    │ Use `guard` (Linux 5.6+).        │
-Linux, attestation needed,    │ Kernel-enforced; signable.       │
-or hostile multi-tenant →     └──────────────────────────────────┘
+Security-critical opens on    │ Use `guard` (Linux 5.6+ on       │
+Linux, attestation needed,    │ x86_64/aarch64).                 │
+or hostile multi-tenant →     │ Kernel-enforced; signable.       │
+                              └──────────────────────────────────┘
 ```
 
 `guard` is the strongest. Use it on Linux where you can.
