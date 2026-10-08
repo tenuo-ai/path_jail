@@ -73,6 +73,9 @@ pub(crate) struct Errno(pub i32);
 
 impl Errno {
     // Errno constants we care about
+    pub const EPERM: Errno = Errno(1); // Blocked by seccomp/LSM policy
+    pub const ENOENT: Errno = Errno(2); // Path component does not exist
+    pub const EAGAIN: Errno = Errno(11); // Concurrent rename/mount during `..` resolution
     pub const EXDEV: Errno = Errno(18); // Cross-device link / escape attempt
     pub const ELOOP: Errno = Errno(40); // Too many symlinks / RESOLVE_NO_SYMLINKS
     pub const ENOSYS: Errno = Errno(38); // Syscall not supported (kernel < 5.6)
@@ -92,11 +95,28 @@ impl From<Errno> for std::io::Error {
 
 // ── openat2 syscall ───────────────────────────────────────────────────────────
 
-/// Calls `openat2(2)` with the given `how` struct.
+/// Bound on `EAGAIN` retries. With `RESOLVE_BENEATH` the kernel returns
+/// `EAGAIN` when a rename or mount races `..` resolution; openat2(2) says to
+/// retry. The bound keeps a hostile rename loop from spinning us forever.
+const OPENAT2_EAGAIN_RETRIES: usize = 32;
+
+/// Calls `openat2(2)` with the given `how` struct, retrying transient `EAGAIN`.
 ///
 /// Returns `Ok(OwnedFd)` on success, `Err(Errno)` on failure.
 /// The errno value is the raw negative return value of the syscall.
 pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedFd, Errno> {
+    let mut result = openat2_once(dirfd, path, how);
+    for _ in 0..OPENAT2_EAGAIN_RETRIES {
+        if !matches!(result, Err(Errno::EAGAIN)) {
+            break;
+        }
+        std::thread::yield_now();
+        result = openat2_once(dirfd, path, how);
+    }
+    result
+}
+
+fn openat2_once(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedFd, Errno> {
     let fd = unsafe {
         syscall4(
             SYS_OPENAT2,
@@ -343,7 +363,9 @@ pub(crate) fn probe_openat2() -> Result<(), Errno> {
         let empty = c"";
         match openat2(-100i32 as RawFd, empty, &how) {
             Ok(_) => Ok(()),
-            Err(e) if e == Errno::ENOSYS => Err(e),
+            // ENOSYS: kernel < 5.6. EPERM: a seccomp/LSM policy (e.g. older
+            // container runtimes) blocks the syscall, so every later call fails.
+            Err(e) if e == Errno::ENOSYS || e == Errno::EPERM => Err(e),
             Err(_) => Ok(()), // Any other error means the syscall exists
         }
     })

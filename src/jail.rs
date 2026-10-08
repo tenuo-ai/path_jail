@@ -31,7 +31,7 @@ impl Jail {
     /// Build a jail from a root that is already canonical and validated
     /// (e.g. [`FdJail::root`](crate::guard::FdJail::root)), skipping the
     /// `canonicalize` syscall.
-    #[cfg(feature = "guard")]
+    #[cfg(all(feature = "guard", unix))]
     pub(crate) fn from_canonical(root: PathBuf) -> Self {
         Self { root }
     }
@@ -303,13 +303,59 @@ impl AsRef<Path> for Jail {
 }
 
 /// `ErrorKind::FilesystemLoop` is unstable, so match the raw `ELOOP` errno.
+/// The value differs by OS and, on Linux, by architecture.
 fn is_symlink_loop(err: &std::io::Error) -> bool {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    const ELOOP: i32 = 40;
-    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-    const ELOOP: i32 = 62;
-    #[cfg(unix)]
-    return err.raw_os_error() == Some(ELOOP);
-    #[cfg(not(unix))]
-    return false;
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6"
+        )
+    ))]
+    const ELOOP: Option<i32> = Some(90);
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    const ELOOP: Option<i32> = Some(62);
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    const ELOOP: Option<i32> = Some(40);
+    #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+    const ELOOP: Option<i32> = Some(90);
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const ELOOP: Option<i32> = Some(62);
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "illumos",
+        target_os = "solaris",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    const ELOOP: Option<i32> = None;
+
+    ELOOP.is_some() && err.raw_os_error() == ELOOP
 }

@@ -44,10 +44,11 @@ fuzz_target!(|data: &[u8]| {
         assert!(joined.starts_with(jails.path.root()));
     }
 
-    // check_path must agree with join and hand back the caller's path unchanged.
-    let checked = jails.fd.check_path(&candidate);
-    assert_eq!(checked.is_ok(), joined.is_ok());
-    if let Ok(checked) = checked {
+    // check_path may be stricter than join (on Linux it applies the kernel's
+    // openat2 rules), but anything it accepts must also be contained by join,
+    // and it must hand back the caller's path unchanged.
+    if let Ok(checked) = jails.fd.check_path(&candidate) {
+        assert!(joined.is_ok(), "check_path accepted a path join rejects");
         assert_eq!(checked, candidate);
     }
 });

@@ -546,17 +546,54 @@ mod linux_impl {
         }
     }
 
+    /// Resolve `path` exactly as `open` would (`RESOLVE_BENEATH |
+    /// RESOLVE_NO_MAGICLINKS`) without opening the file for I/O.
+    ///
+    /// Returns `Ok(true)` if it resolves, `Ok(false)` if a component does not
+    /// exist yet, and the mapped jail error for any kernel rejection.
+    pub(crate) fn resolves_beneath(dirfd: &OwnedFd, path: &Path) -> Result<bool, JailError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let target = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
+        let cpath = CString::new(target.as_os_str().as_bytes())
+            .map_err(|_| JailError::InvalidPath("null bytes not allowed".into()))?;
+        let how = OpenHow {
+            flags: O_PATH | O_CLOEXEC,
+            mode: 0,
+            resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+        };
+        match openat2(dirfd.as_raw_fd(), &cpath, &how) {
+            Ok(_) => Ok(true),
+            Err(Errno::ENOENT) => Ok(false),
+            Err(e) => Err(map_errno_to_jail_error(e, path)),
+        }
+    }
+
     fn path_component(path: &Path) -> Result<(&Path, CString), JailError> {
         use std::os::unix::ffi::OsStrExt;
+
+        // `Path::file_name` normalizes away a trailing "/" or "/.", which would
+        // turn `remove_file("link/")` into unlinking the symlink itself and
+        // `remove_dir("sub/.")` into removing `sub`. Reject them instead.
+        let last = path
+            .as_os_str()
+            .as_bytes()
+            .rsplit(|b| *b == b'/')
+            .next()
+            .unwrap_or_default();
+        if last.is_empty() || last == b"." || last == b".." {
+            return Err(JailError::InvalidPath(
+                "final path component cannot be empty, '.' or '..'".into(),
+            ));
+        }
 
         let name = path.file_name().ok_or_else(|| {
             JailError::InvalidPath("operation requires a final path component".into())
         })?;
-        if name == "." || name == ".." {
-            return Err(JailError::InvalidPath(
-                "final path component cannot be '.' or '..'".into(),
-            ));
-        }
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let name = CString::new(name.as_bytes())
             .map_err(|_| JailError::InvalidPath("null bytes not allowed".into()))?;
@@ -828,6 +865,8 @@ pub struct FdJail {
     pub(crate) root: PathBuf,
     /// Root inode pinned at construction time.
     pub(crate) root_inode: u64,
+    /// Device of the pinned root; inode numbers are only unique per device.
+    pub(crate) root_dev: u64,
     /// Open directory fd (Linux only).
     #[cfg(all(
         target_os = "linux",
@@ -858,6 +897,7 @@ impl FdJail {
             Ok(Self {
                 root: self.root.clone(),
                 root_inode: self.root_inode,
+                root_dev: self.root_dev,
                 dirfd: self.dirfd.as_fd().try_clone_to_owned()?,
             })
         }
@@ -870,6 +910,7 @@ impl FdJail {
             Ok(Self {
                 root: self.root.clone(),
                 root_inode: self.root_inode,
+                root_dev: self.root_dev,
             })
         }
     }
@@ -968,6 +1009,7 @@ impl FdJail {
             Ok(FdJail {
                 root,
                 root_inode,
+                root_dev: opened_meta.dev(),
                 dirfd,
             })
         }
@@ -982,6 +1024,7 @@ impl FdJail {
             Ok(FdJail {
                 root,
                 root_inode: root_meta.ino(),
+                root_dev: root_meta.dev(),
             })
         }
     }
@@ -1131,8 +1174,12 @@ impl FdJail {
     ///
     /// Returns the caller's relative path (not a symlink-resolved one) if it
     /// passes the same format checks as [`open`](Self::open) and a
-    /// point-in-time containment walk beneath the jail root. Fails if the
-    /// directory at the root path is no longer the pinned root inode. This is
+    /// point-in-time containment check. On Linux, existing paths are resolved
+    /// by the kernel with the same `openat2` rules as `open` (via a transient
+    /// `O_PATH` descriptor), so absolute symlinks and magic links are rejected
+    /// just as `open` rejects them; paths with a missing component fall back to
+    /// [`Jail::join`](crate::Jail::join). Fails if the directory at the root
+    /// path is no longer the pinned root (device and inode). This is
     /// **weaker** than `open` because no fd is held: the path can change
     /// between this call and any subsequent filesystem operation.
     ///
@@ -1151,7 +1198,7 @@ impl FdJail {
             path: self.root.clone(),
             source: Some(e),
         })?;
-        if root_meta.ino() != self.root_inode {
+        if root_meta.dev() != self.root_dev || root_meta.ino() != self.root_inode {
             return Err(JailError::InvalidRoot {
                 path: self.root.clone(),
                 source: Some(std::io::Error::new(
@@ -1159,6 +1206,13 @@ impl FdJail {
                     "jail root was replaced after it was pinned",
                 )),
             });
+        }
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        if linux_impl::resolves_beneath(&self.dirfd, &rel)? {
+            return Ok(rel);
         }
         crate::jail::Jail::from_canonical(self.root.clone()).join(&rel)?;
         Ok(rel)
@@ -1191,6 +1245,7 @@ impl std::fmt::Debug for FdJail {
         f.debug_struct("FdJail")
             .field("root", &self.root)
             .field("root_inode", &self.root_inode)
+            .field("root_dev", &self.root_dev)
             .field("toctou_safe", &cfg!(target_os = "linux"))
             .finish()
     }

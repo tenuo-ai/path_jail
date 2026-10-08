@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create/truncate/append access combinations consistently across platforms.
 - Path validation now propagates metadata/permission errors instead of treating
   them as nonexistent paths.
+- On Linux, `FdJail::check_path()` resolves existing paths with the same
+  `openat2` rules as `open`, so it no longer approves absolute or magic
+  symlinks that `open` rejects. The root identity check compares device and
+  inode.
+- Guard mutations reject a trailing `/`, `/.` or `/..` instead of silently
+  acting on the normalized name (e.g. unlinking `link` for `link/`).
+- `openat2` retries transient `EAGAIN` from `..` resolution races, and an
+  `EPERM` from seccomp/LSM policy now fails `FdJail::new` with
+  `UnsupportedKernel` instead of breaking every later call.
 - The guard API accepts non-UTF-8 Unix paths.
 
 ### Documentation

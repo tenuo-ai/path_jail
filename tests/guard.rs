@@ -873,3 +873,54 @@ fn guarded_mutations_honor_no_symlinks() {
     jail.remove_dir_with("real/a", strict.no_xdev(true))
         .unwrap();
 }
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_mutations_reject_trailing_slash_and_dot() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::os::unix::fs::symlink("sub", dir.path().join("link")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    for (path, is_dir) in [
+        ("link/", false),
+        ("sub/", true),
+        ("sub/.", true),
+        ("sub/..", true),
+    ] {
+        let result = if is_dir {
+            jail.remove_dir(path)
+        } else {
+            jail.remove_file(path)
+        };
+        assert!(
+            matches!(result, Err(JailError::InvalidPath(_))),
+            "{path:?} should be rejected"
+        );
+    }
+    assert!(dir.path().join("link").symlink_metadata().is_ok());
+    assert!(dir.path().join("sub").is_dir());
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn check_path_matches_open_for_absolute_symlink_into_jail() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("data.txt"), b"x").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    std::os::unix::fs::symlink(jail.root().join("data.txt"), dir.path().join("abs")).unwrap();
+
+    // openat2(RESOLVE_BENEATH) rejects absolute symlinks even when they point
+    // inside the jail; check_path must not approve what open refuses.
+    assert!(jail.open("abs", OpenOptions::new().read(true)).is_err());
+    assert!(jail.check_path("abs").is_err());
+    // Missing paths still validate, and plain existing paths still pass.
+    assert!(jail.check_path("new/dir/file.txt").is_ok());
+    assert!(jail.check_path("data.txt").is_ok());
+}
