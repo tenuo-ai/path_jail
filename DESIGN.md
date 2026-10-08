@@ -114,9 +114,9 @@ single kernel syscall — there is no userspace window between them.
 | Mechanism | Protection | Platforms |
 |---|---|---|
 | `openat2` | Atomic; covers all components + magic links | Linux 5.6+ |
-| `O_NOFOLLOW` fallback | Final component only | macOS / BSD |
+| `O_NOFOLLOW` fallback | Final component only | macOS / BSD / other Linux architectures |
 
-The fallback path on macOS/BSD is intentionally equivalent to `secure-open`. Callers can detect
+The fallback path on macOS/BSD and Linux architectures without an `openat2` shim is intentionally equivalent to `secure-open`. Callers can detect
 which path was used at runtime via `Attestation::toctou_safe`.
 
 ---
@@ -210,7 +210,7 @@ path_jail/
 │   ├── openat2.rs      # Raw openat2 syscall wrapper (Linux)
 │   └── guard/
 │       ├── mod.rs      # Re-exports
-│       ├── fd_jail.rs  # FdJail, JailFile, Attestation, OpenOptions
+│       ├── fd_jail.rs  # FdJail, GuardedFile, Attestation, OpenOptions, FileKind
 │       └── signing.rs  # Signer, Verifier, VerifyError traits
 ├── tests/
 │   ├── security.rs     # Core path-validation tests
@@ -262,7 +262,7 @@ Enabling `guard` on Windows compiles without error but is a no-op (all items are
 
 ## 7. Platform Support Matrix
 
-| Feature | Linux 5.6+ | Linux < 5.6 | macOS / BSD | Windows |
+| Feature | Linux 5.6+ (x86_64/aarch64) | Linux < 5.6 | macOS / BSD / other Linux arches | Windows |
 |---|---|---|---|---|
 | `default` | ✓ | ✓ | ✓ | ✓ |
 | `secure-open` | ✓ | ✓ | ✓ | no-op |
@@ -274,13 +274,15 @@ Enabling `guard` on Windows compiles without error but is a no-op (all items are
 
 See `README.md` § Limitations and `SECURITY.md` for the full threat model. Key points:
 
-- **Hard links** cannot be detected by path inspection alone. `JailFile::has_hard_links()` checks
-  `nlink` after the fd is open — use it to enforce hard-link policy.
+- **Hard links** cannot be detected by path inspection alone. `OpenOptions::reject_hard_links(true)`
+  checks `nlink` on the opened handle and fails the open (`GuardedFile::has_hard_links()` reports
+  it for callers with their own policy). The check is point-in-time.
 - **Mount points** — use `OpenOptions::no_xdev()` on Linux to block cross-mount traversal.
 - **Windows reserved device names** (`CON`, `NUL`, etc.) — validate before calling path_jail.
 - **Unicode normalization** (macOS NFD) — always store `jail.root()`, never the raw input.
-- **TOCTOU on macOS** — the `guard` fallback is not atomic; use Linux 5.6+ or OS isolation for
-  the strongest guarantees.
+- **TOCTOU on the fallback** (macOS/BSD and Linux architectures other than x86_64/aarch64) — the
+  `guard` fallback is not atomic; use Linux 5.6+ on x86_64/aarch64 or OS isolation for the
+  strongest guarantees.
 
 ---
 

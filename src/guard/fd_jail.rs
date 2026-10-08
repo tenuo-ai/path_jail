@@ -11,7 +11,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! path_jail = { version = "0.4", features = ["guard"] }
+//! path_jail = { version = "0.5", features = ["guard"] }
 //! ```
 
 use crate::error::JailError;
