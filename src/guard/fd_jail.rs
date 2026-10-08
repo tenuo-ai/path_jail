@@ -396,17 +396,22 @@ impl OpenOptions {
 
     /// Require the opened handle to be a regular file.
     ///
-    /// Anything else (directory, FIFO, socket, block or character device) fails
-    /// with [`JailError::FileTypeRejected`]. The check uses `fstat` on the
-    /// opened handle, so it cannot be raced by swapping the path afterwards.
+    /// A non-regular file that the OS lets us open (a directory, a FIFO opened
+    /// for reading, a block or character device) fails with
+    /// [`JailError::FileTypeRejected`]. The check uses `fstat` on the opened
+    /// handle, so it cannot be raced by swapping the path afterwards.
+    ///
+    /// Some special files never yield a handle to check: opening a socket, or
+    /// a write-only open of a FIFO with no reader, fails inside the kernel
+    /// (`ENXIO` on Linux) and surfaces as [`JailError::Io`]. Either way no
+    /// handle is returned, but match on both variants if you need to tell
+    /// "rejected special file" apart from other errors.
     ///
     /// While any handle policy is set, the open uses `O_NONBLOCK` so a FIFO
     /// planted in the jail cannot block the caller waiting for a peer. The
     /// flag is cleared again before the handle is returned, so callers always
     /// get an ordinary blocking descriptor.
     ///
-    /// A write-only open of a FIFO with no reader, or an open of a socket,
-    /// fails in the kernel with `ENXIO` and surfaces as [`JailError::Io`].
     /// Opening a device node can have driver side effects before it is
     /// rejected (guarded opens always pass `O_NOCTTY`, so a terminal never
     /// becomes the caller's controlling tty); device nodes need `CAP_MKNOD` to
@@ -424,7 +429,14 @@ impl OpenOptions {
     /// are not symlinks. With this set, an `nlink > 1` file fails with
     /// [`JailError::HardLinkRejected`]. When combined with
     /// [`truncate`](Self::truncate), truncation is deferred until the check
-    /// passes, so a linked file is never emptied.
+    /// passes, so a file that is already hard-linked when it is opened is not
+    /// emptied.
+    ///
+    /// This does not make truncation race-free: a process that adds a hard
+    /// link between the check and the deferred `ftruncate` still sees the file
+    /// emptied, and nothing can undo that afterwards. If a concurrent re-link
+    /// is in your threat model, do not truncate in place; write a new file and
+    /// rename it over the destination instead.
     ///
     /// Directories are exempt: they always report `nlink >= 2` and cannot be
     /// hard-linked. The open is non-blocking as described under

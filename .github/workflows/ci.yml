@@ -75,9 +75,6 @@ jobs:
           # 64-bit big-endian: also checks attestation encoding is LE-fixed.
           - target: s390x-unknown-linux-gnu
             test_args: --all-features
-          # SPARC has its own O_NONBLOCK/O_NOCTTY values and ELOOP = 62.
-          - target: sparc64-unknown-linux-gnu
-            test_args: --all-features
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
@@ -103,6 +100,11 @@ jobs:
           - target: x86_64-unknown-netbsd
             features: --all-features
           - target: loongarch64-unknown-linux-gnu
+            features: --all-features
+          # SPARC has its own O_NONBLOCK/O_NOCTTY values and ELOOP = 62. Runtime
+          # tests are not possible with cross 0.2.5: its sparc64 image's glibc
+          # predates getrandom, which current std links against.
+          - target: sparc64-unknown-linux-gnu
             features: --all-features
           # guard and secure-open refuse to build on illumos (unknown O_* ABI);
           # check the path-only API, including its illumos ELOOP branch.

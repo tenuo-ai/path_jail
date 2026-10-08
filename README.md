@@ -550,9 +550,12 @@ pathname-based fallback would reintroduce the race they are designed to avoid.
 **Not blocked by `openat2` — opt in with `OpenOptions` handle policies:**
 - Hard links: a hard link inside the jail can name an inode that also lives
   outside it. `reject_hard_links(true)` → `JailError::HardLinkRejected`, and a
-  requested `truncate` is deferred until the check passes.
-- FIFOs, sockets and device nodes: `require_regular_file(true)` →
-  `JailError::FileTypeRejected`. The open uses `O_NONBLOCK`, so a planted FIFO
+  requested `truncate` is deferred until the check passes. The check is
+  point-in-time: a link added between the check and the truncate still sees the
+  file emptied, so write-then-rename when that race matters.
+- FIFOs, directories and device nodes: `require_regular_file(true)` →
+  `JailError::FileTypeRejected`. Sockets, and write-only opens of a FIFO with no
+  reader, fail in the kernel before a handle exists and return `JailError::Io`. The open uses `O_NONBLOCK`, so a planted FIFO
   is rejected instead of hanging the caller.
 
 **Returns `JailError::UnsupportedKernel`** on Linux kernels older than 5.6. Zero additional dependencies — raw syscall, no libc.

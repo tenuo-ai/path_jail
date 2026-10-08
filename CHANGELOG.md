@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JailError::HardLinkRejected` variants. With either policy set, the open uses
   `O_NONBLOCK` so a FIFO in the jail cannot block the caller (cleared again
   before the handle is returned, on every platform), `truncate` is deferred until the
-  policies pass so a hard-linked file is never emptied, and directories are
+  policies pass (so an already hard-linked file is not emptied; the check is
+  point-in-time, not race-free), and directories are
   exempt from the hard-link check. Guarded opens on Linux now pass `O_NOCTTY`.
 - `GuardedFile::opened_metadata()` and `GuardedFile::file_kind()` expose the
   point-in-time metadata captured at open, with the new `guard::FileKind` enum.

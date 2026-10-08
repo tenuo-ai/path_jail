@@ -1020,13 +1020,15 @@ fn require_regular_file_rejects_socket() {
     let _listener = std::os::unix::net::UnixListener::bind(dir.path().join("sock")).unwrap();
     let jail = FdJail::new(dir.path()).unwrap();
 
-    // The kernel refuses to open a socket (ENXIO) before fstat can classify it.
-    assert!(jail
-        .open(
+    // The kernel refuses to open a socket before fstat can classify it, so the
+    // documented outcome is Io, not FileTypeRejected.
+    assert!(matches!(
+        jail.open(
             "sock",
             OpenOptions::new().read(true).require_regular_file(true)
-        )
-        .is_err());
+        ),
+        Err(JailError::Io(_))
+    ));
 }
 
 #[test]
@@ -1143,7 +1145,7 @@ extern "C" {
     fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
 }
 
-/// `O_NONBLOCK` for the hosts CI runs the guard suite on.
+/// `O_NONBLOCK` per platform, matching the guard fallback's table.
 #[cfg(any(
     target_os = "macos",
     target_os = "freebsd",
@@ -1164,6 +1166,21 @@ const TEST_O_NONBLOCK: std::os::raw::c_int = 0x0004;
     ))
 ))]
 const TEST_O_NONBLOCK: std::os::raw::c_int = 0o4000;
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6"
+    )
+))]
+const TEST_O_NONBLOCK: std::os::raw::c_int = 0x80;
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(target_arch = "sparc", target_arch = "sparc64")
+))]
+const TEST_O_NONBLOCK: std::os::raw::c_int = 0x4000;
 
 #[test]
 #[cfg(unix)]
