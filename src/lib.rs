@@ -9,6 +9,8 @@
 //!
 //! ```no_run
 //! let safe_path = path_jail::join("/var/uploads", "user/file.txt")?;
+//! // A separate lookup: if other processes can change the tree, use the
+//! // `guard` API below so validation and open are one atomic step.
 //! std::fs::write(&safe_path, b"hello")?;
 //! # Ok::<(), path_jail::JailError>(())
 //! ```
@@ -31,7 +33,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! path_jail = { version = "0.4", features = ["guard"] }
+//! path_jail = { version = "0.5", features = ["guard"] }
 //! ```
 //!
 //! ```no_run
@@ -39,10 +41,13 @@
 //! use path_jail::guard::{FdJail, OpenOptions};
 //!
 //! let jail = FdJail::new("/var/uploads")?;
-//! let mut gf = jail.open("report.pdf", OpenOptions::new().read(true))?;
-//! if gf.has_hard_links() {
-//!     // Enforce hard-link policy here
-//! }
+//! let mut gf = jail.open(
+//!     "report.pdf",
+//!     OpenOptions::new()
+//!         .read(true)
+//!         .require_regular_file(true) // FIFOs, devices, dirs → FileTypeRejected
+//!         .reject_hard_links(true),   // nlink > 1 → HardLinkRejected
+//! )?;
 //! use std::io::Read;
 //! let mut buf = Vec::new();
 //! gf.read_to_end(&mut buf)?;
@@ -58,7 +63,7 @@
 //! use path_jail::{Jail, JailedPath};
 //!
 //! fn save_upload(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
-//!     // path is guaranteed to be inside the jail
+//!     // Validated when constructed; not pinned against concurrent changes.
 //!     std::fs::write(&path, data)
 //! }
 //!
@@ -142,6 +147,7 @@ pub use open::JailedFile;
 /// # let user_input = "report.pdf";
 /// # let data = b"contents";
 /// let safe = path_jail::join("/var/uploads", user_input)?;
+/// // Separate lookup; use the `guard` API if the tree can change concurrently.
 /// std::fs::write(&safe, data)?;
 /// # Ok::<(), path_jail::JailError>(())
 /// ```

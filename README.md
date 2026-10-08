@@ -33,8 +33,10 @@ if !path.starts_with(&root) {
 ## The Solution
 
 ```rust
-// One-liner for simple cases
+// One-liner for simple cases: validates the untrusted string
 let path = path_jail::join("/var/uploads", user_input)?;
+// The write is a separate lookup. If other processes can change the tree,
+// use the `guard` feature instead (see TOCTOU below).
 std::fs::write(&path, data)?;
 
 // Blocked: returns Err(EscapedRoot)
@@ -98,6 +100,8 @@ capability-based alternative that replaces `std::fs` entirely, see [`cap-std`](h
 Hard links cannot be detected by path inspection. If an attacker has shell access and creates a hard link to a sensitive file inside your jail, path_jail will allow access.
 
 **Mitigations:**
+- With the `guard` feature, open with `OpenOptions::reject_hard_links(true)`
+  (checked on the opened handle)
 - Use a separate partition for the jail (hard links cannot cross partitions)
 - Use container isolation
 
@@ -114,6 +118,8 @@ jail.join("mnt/etc/passwd")?;  // Passes check, but accesses root filesystem!
 Detecting mount points would require `stat()` on every path component (expensive) or parsing `/proc/mounts` (Linux-only).
 
 **Mitigations:**
+- With the `guard` feature on Linux, open with `OpenOptions::no_xdev(true)`
+  (`RESOLVE_NO_XDEV` rejects any mount crossing)
 - Mounting requires root privileges. If attacker has root, path validation is moot.
 - Use container isolation (separate mount namespace)
 
@@ -281,7 +287,8 @@ Use `JailedPath` for compile-time guarantees:
 use path_jail::{Jail, JailedPath};
 
 fn save_upload(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
-    // path is guaranteed to be inside the jail - no runtime check needed
+    // Validated against untrusted input when constructed. It is not pinned:
+    // concurrent filesystem changes need the `guard` API.
     std::fs::write(&path, data)
 }
 
@@ -342,7 +349,8 @@ let jail = Jail::new("/var/uploads")?;
 
 match jail.join(user_input) {
     Ok(path) => {
-        // Safe to use
+        // Validated. The write is a separate step; see TOCTOU-Safe File
+        // Operations if other processes can change the tree concurrently.
         std::fs::write(&path, data)?;
     }
     Err(JailError::EscapedRoot { attempted, root }) => {
@@ -367,81 +375,150 @@ match jail.join(user_input) {
 
 ## Example: File Uploads
 
+With the `guard` feature, resolution and open happen in one kernel-checked
+step, so nothing can swap a symlink in between:
+
 ```rust
-use path_jail::Jail;
-use std::path::PathBuf;
+use path_jail::guard::{FdJail, OpenOptions};
+use path_jail::JailError;
+use std::io::Write;
 
 struct UploadService {
-    jail: Jail,
+    jail: FdJail,
+}
+
+/// Accept one path segment only, so `user_id`/`filename` cannot reach into
+/// another user's directory with `..` or `/`.
+fn plain_name(s: &str) -> Result<&str, JailError> {
+    if s.is_empty() || s == "." || s == ".." || s.contains('/') || s.contains('\0') {
+        return Err(JailError::InvalidPath(format!("not a plain file name: {s:?}")));
+    }
+    Ok(s)
 }
 
 impl UploadService {
-    fn new(root: &str) -> Result<Self, path_jail::JailError> {
-        Ok(Self { jail: Jail::new(root)? })
+    fn new(root: &str) -> Result<Self, JailError> {
+        Ok(Self { jail: FdJail::new(root)? })
     }
 
-    fn save(&self, user_id: &str, filename: &str, data: &[u8]) -> std::io::Result<PathBuf> {
-        let path = self.jail.join(format!("{}/{}", user_id, filename))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    fn save(&self, user_id: &str, filename: &str, data: &[u8]) -> Result<(), JailError> {
+        let user_dir = plain_name(user_id)?;
+        // fd-relative mkdir (Linux x86_64/aarch64). Elsewhere, pre-create
+        // per-user directories out of band.
+        match self.jail.create_dir(user_dir) {
+            Ok(()) => {}
+            Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
         }
-        std::fs::write(&path, data)?;
-        Ok(path)
+
+        let mut file = self.jail.open(
+            format!("{user_dir}/{}", plain_name(filename)?),
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)          // never overwrite an existing upload
+                .no_symlinks(true)         // no symlinked user directories
+                .require_regular_file(true)
+                .reject_hard_links(true),
+        )?;
+        file.write_all(data)?;
+        Ok(())
     }
 }
 ```
 
+Without `guard`, `Jail::join` validates the untrusted string, but the write
+that follows is a separate pathname lookup. That is fine when only your
+service writes to the tree; see [TOCTOU Race Conditions](#toctou-race-conditions)
+otherwise.
+
 ## Framework Integration
+
+These examples use the `guard` feature
+(`path_jail = { version = "0.5", features = ["guard"] }`). Guarded opens and
+writes are blocking calls, so they run off the async executor.
 
 ### Axum
 
 ```rust
 use axum::{extract::Path, http::StatusCode, response::IntoResponse};
 use bytes::Bytes;
-use path_jail::Jail;
+use path_jail::guard::{FdJail, OpenOptions};
+use path_jail::JailError;
+use std::io::Write;
 use std::sync::LazyLock;
 
-static UPLOADS: LazyLock<Jail> = LazyLock::new(|| {
-    Jail::new("/var/uploads").expect("uploads dir must exist")
+static UPLOADS: LazyLock<FdJail> = LazyLock::new(|| {
+    FdJail::new("/var/uploads").expect("uploads dir must exist")
 });
 
 async fn upload(
     Path(filename): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let path = UPLOADS.join(&filename).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<(), JailError> {
+        let mut file = UPLOADS.open(
+            &filename,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .require_regular_file(true)
+                .reject_hard_links(true),
+        )?;
+        file.write_all(&body)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match result {
+        Ok(()) => Ok(StatusCode::CREATED),
+        Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(StatusCode::CONFLICT)
+        }
+        Err(JailError::Io(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        // Escape, symlink, special file, hard link, invalid path.
+        Err(_) => Err(StatusCode::BAD_REQUEST),
     }
-    std::fs::write(&path, &body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    Ok(StatusCode::CREATED)
 }
 ```
 
 ### Actix-web
 
 ```rust
-use actix_web::{web, HttpResponse, Result};
-use path_jail::Jail;
+use actix_web::{error, web, HttpResponse, Result};
+use path_jail::guard::{FdJail, OpenOptions};
+use path_jail::JailError;
+use std::io::Write;
 use std::sync::LazyLock;
 
-static UPLOADS: LazyLock<Jail> = LazyLock::new(|| {
-    Jail::new("/var/uploads").expect("uploads dir must exist")
+static UPLOADS: LazyLock<FdJail> = LazyLock::new(|| {
+    FdJail::new("/var/uploads").expect("uploads dir must exist")
 });
 
-async fn upload(
-    path: web::Path<String>,
-    body: web::Bytes,
-) -> Result<HttpResponse> {
-    let safe_path = UPLOADS.join(path.as_str())
-        .map_err(|_| actix_web::error::ErrorBadRequest("invalid path"))?;
-    
-    std::fs::write(&safe_path, &body)?;
-    Ok(HttpResponse::Created().finish())
+async fn upload(path: web::Path<String>, body: web::Bytes) -> Result<HttpResponse> {
+    let filename = path.into_inner();
+    let result = web::block(move || -> Result<(), JailError> {
+        let mut file = UPLOADS.open(
+            &filename,
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .require_regular_file(true)
+                .reject_hard_links(true),
+        )?;
+        file.write_all(&body)?;
+        Ok(())
+    })
+    .await?;
+
+    match result {
+        Ok(()) => Ok(HttpResponse::Created().finish()),
+        Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(error::ErrorConflict("file already exists"))
+        }
+        Err(JailError::Io(e)) => Err(error::ErrorInternalServerError(e)),
+        Err(e) => Err(error::ErrorBadRequest(e)),
+    }
 }
 ```
 
@@ -453,7 +530,7 @@ Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations:
 
 ```toml
 [dependencies]
-path_jail = { version = "0.4", features = ["secure-open"] }
+path_jail = { version = "0.5", features = ["secure-open"] }
 ```
 
 ```rust
@@ -488,7 +565,7 @@ The `guard` feature uses a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLIN
 
 ```toml
 [dependencies]
-path_jail = { version = "0.4", features = ["guard"] }
+path_jail = { version = "0.5", features = ["guard"] }
 ```
 
 ```rust

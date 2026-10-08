@@ -78,7 +78,7 @@ Footnotes:
 5. Opt in by implementing the `Signer` trait. `path_jail` ships no crypto;
    bring your own (`ed25519-dalek`, `ring`, HSM client, KMS, etc.).
 
-   Version 0.4 attestations prove that a holder of the configured signing key
+   Version 1 attestations (the format used by 0.4 and 0.5) prove that a holder of the configured signing key
    signed the recorded fields. They do **not** include a verifier challenge,
    audience, key identifier, or expiration policy, and are therefore
    replayable. Do not use them as authorization tokens. Bind freshness and

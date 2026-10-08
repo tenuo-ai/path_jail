@@ -7,28 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 
 - Linux x86_64/aarch64 `guard` operations for fd-relative directory creation,
-  file/directory removal, and rename. Parent directories are pinned with
+  file/directory removal, and rename (`FdJail::create_dir`, `remove_file`,
+  `remove_dir`, `rename`). Parent directories are pinned with
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` before the matching `*at`
-  syscall executes. `*_with` variants take `ResolveOptions` to apply
-  `no_symlinks`/`no_xdev` to parent resolution.
-- `FdJail::try_clone()` for services that need to handle file-descriptor
-  exhaustion without the panic inherent in the `Clone` trait.
-- Scheduled fuzzing of arbitrary path bytes and a privileged bind-mount test
-  for `RESOLVE_NO_XDEV`.
+  syscall executes. `*_with` variants take the new `ResolveOptions` to apply
+  `no_symlinks`/`no_xdev` to parent resolution. A trailing `/`, `/.` or `/..`
+  is rejected rather than normalized away.
 - `OpenOptions::require_regular_file()` and `OpenOptions::reject_hard_links()`
   handle policies for guarded opens, checked with `fstat` on the opened handle.
   Failures return the new `JailError::FileTypeRejected` and
   `JailError::HardLinkRejected` variants. With either policy set, the open uses
   `O_NONBLOCK` so a FIFO in the jail cannot block the caller (cleared again
-  before the handle is returned, on every platform), `truncate` is deferred until the
-  policies pass (so an already hard-linked file is not emptied; the check is
-  point-in-time, not race-free), and directories are
-  exempt from the hard-link check. Guarded opens on Linux now pass `O_NOCTTY`.
+  before the handle is returned), `truncate` is deferred until the policies
+  pass (so an already hard-linked file is not emptied; the check is
+  point-in-time, not race-free), and directories are exempt from the
+  hard-link check.
 - `GuardedFile::opened_metadata()` and `GuardedFile::file_kind()` expose the
   point-in-time metadata captured at open, with the new `guard::FileKind` enum.
+- `FdJail::try_clone()` for services that need to handle file-descriptor
+  exhaustion without the panic inherent in the `Clone` trait.
+
+### Changed
+
+- `OpenOptions` rejects invalid access combinations on every platform, matching
+  `std::fs::OpenOptions`: `create`/`create_new` without write or append,
+  `truncate` without write, and `truncate` with `append` now return
+  `JailError::InvalidPath` instead of being passed to the kernel.
+- `Jail::join` (and everything built on it) propagates metadata and permission
+  errors as `JailError::Io` instead of treating the component as nonexistent.
+  Symlink loops are still reported as `BrokenSymlink`.
+- `FdJail::check_path()` now performs a point-in-time containment check instead
+  of only validating the string: it rejects traversal and symlink escapes,
+  rejects a jail root replaced since `FdJail::new` (device and inode), and
+  returns the caller's path rather than a symlink-resolved one. On Linux,
+  existing paths are resolved with the same `openat2` rules as `open`, so
+  absolute and magic symlinks that `open` rejects are rejected here too.
+- `FdJail::new` fails with `UnsupportedKernel` when a seccomp/LSM policy
+  answers `openat2` with `EPERM`, instead of succeeding and failing every
+  later call.
+- Guarded opens on Linux pass `O_NOCTTY`.
 
 ### Fixed
 
@@ -38,29 +60,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct `O_DIRECTORY`/`O_NOFOLLOW` for the openat2 path on Linux aarch64,
   where the x86_64 values mean `O_DIRECT`/`O_LARGEFILE`. The pinned root dirfd
   previously lacked `O_DIRECTORY | O_NOFOLLOW` on aarch64.
-- `FdJail::check_path()` now performs a point-in-time path containment check,
-  rejects traversal and symlink escapes, rejects a replaced jail root, and
-  returns the caller's path rather than a symlink-resolved one.
-- Linux `OpenOptions` now handles read+write as `O_RDWR` and rejects invalid
-  create/truncate/append access combinations consistently across platforms.
-- Path validation now propagates metadata/permission errors instead of treating
-  them as nonexistent paths.
-- On Linux, `FdJail::check_path()` resolves existing paths with the same
-  `openat2` rules as `open`, so it no longer approves absolute or magic
-  symlinks that `open` rejects. The root identity check compares device and
-  inode.
-- Guard mutations reject a trailing `/`, `/.` or `/..` instead of silently
-  acting on the normalized name (e.g. unlinking `link` for `link/`).
-- `openat2` retries transient `EAGAIN` from `..` resolution races, and an
-  `EPERM` from seccomp/LSM policy now fails `FdJail::new` with
-  `UnsupportedKernel` instead of breaking every later call.
+- Linux guarded opens with read and write/append use `O_RDWR` instead of
+  `O_WRONLY`.
+- `openat2` retries transient `EAGAIN` from `..` resolution races.
 - The guard API accepts non-UTF-8 Unix paths.
 
 ### Documentation
 
+- README and crate examples for uploads and web frameworks use the guard API
+  (`FdJail` with `require_regular_file`/`reject_hard_links`) instead of
+  validate-then-`std::fs::write`; path-only examples now state that the write
+  is a separate, unpinned step.
 - Correct magic-link errors to `SymlinkRejected`, compile the signing adapter
   example, publish all-feature docs on docs.rs, and document v1 attestation
   replay limitations.
+
+### CI
+
+- Runtime tests under QEMU for i686, powerpc, powerpc64le, riscv64gc and
+  s390x; compile/lint checks for Android, FreeBSD, NetBSD, loongarch64,
+  sparc64 and illumos; the full suite on a FreeBSD 14 VM; a native arm64
+  runner for the guard suite.
+- Scheduled fuzzing of arbitrary path bytes and a privileged bind-mount test
+  for `RESOLVE_NO_XDEV`.
 
 ## [0.4.0] - 2026-05-21
 

@@ -1,4 +1,4 @@
-//! A validated path guaranteed to be inside a [`Jail`](crate::Jail).
+//! A path validated to be inside a [`Jail`](crate::Jail) when it was constructed.
 
 use std::ffi::OsStr;
 use std::fmt;
