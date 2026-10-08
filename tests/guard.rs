@@ -1090,3 +1090,81 @@ fn reject_hard_links_allows_single_link_and_applies_deferred_truncate() {
         )
         .is_ok());
 }
+
+#[test]
+#[cfg(unix)]
+fn reject_hard_links_exempts_directories() {
+    use path_jail::guard::FileKind;
+
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    // Directories always report nlink >= 2 but cannot be hard-linked.
+    let handle = jail
+        .open("sub", OpenOptions::new().read(true).reject_hard_links(true))
+        .unwrap();
+    assert_eq!(handle.file_kind(), FileKind::Directory);
+}
+
+#[test]
+#[cfg(unix)]
+fn reject_hard_links_alone_does_not_block_on_fifo() {
+    use path_jail::guard::FileKind;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("pipe"))
+        .status()
+        .expect("mkfifo available");
+    assert!(status.success());
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let kind = jail
+            .open(
+                "pipe",
+                OpenOptions::new().read(true).reject_hard_links(true),
+            )
+            .map(|f| f.file_kind());
+        let _ = tx.send(kind.ok());
+    });
+    let kind = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("open of a FIFO blocked with reject_hard_links set");
+    assert_eq!(kind, Some(FileKind::Fifo));
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn handle_policies_return_a_blocking_descriptor() {
+    use std::os::unix::io::AsRawFd;
+
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    let file = jail
+        .open(
+            "a.txt",
+            OpenOptions::new()
+                .read(true)
+                .require_regular_file(true)
+                .reject_hard_links(true),
+        )
+        .unwrap();
+
+    // fdinfo reports the open file status flags in octal; O_NONBLOCK is 0o4000.
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd())).unwrap();
+    let flags = info
+        .lines()
+        .find_map(|line| line.strip_prefix("flags:"))
+        .map(|v| u64::from_str_radix(v.trim(), 8).unwrap())
+        .expect("flags line in fdinfo");
+    assert_eq!(flags & 0o4000, 0, "O_NONBLOCK leaked to caller: {flags:o}");
+}

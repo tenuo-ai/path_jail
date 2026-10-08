@@ -39,6 +39,7 @@ pub(crate) const O_EXCL: u64 = 0o200;
 pub(crate) const O_TRUNC: u64 = 0o1000;
 pub(crate) const O_APPEND: u64 = 0o2000;
 pub(crate) const O_NONBLOCK: u64 = 0o4000;
+pub(crate) const O_NOCTTY: u64 = 0o400;
 pub(crate) const O_CLOEXEC: u64 = 0o2000000;
 #[cfg(target_arch = "x86_64")]
 pub(crate) const O_DIRECTORY: u64 = 0o200000;
@@ -49,6 +50,13 @@ pub(crate) const O_NOFOLLOW: u64 = 0o400000;
 #[cfg(target_arch = "aarch64")]
 pub(crate) const O_NOFOLLOW: u64 = 0o100000;
 pub(crate) const O_PATH: u64 = 0o10000000;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_FCNTL: i64 = 72;
+#[cfg(target_arch = "aarch64")]
+const SYS_FCNTL: i64 = 25;
+const F_GETFL: i64 = 3;
+const F_SETFL: i64 = 4;
 
 #[cfg(target_arch = "x86_64")]
 const SYS_MKDIRAT: i64 = 258;
@@ -136,6 +144,27 @@ fn openat2_once(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedFd, Err
         // SAFETY: kernel returned a valid fd ≥ 0
         Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
     }
+}
+
+/// Clears `O_NONBLOCK` on `fd` via `fcntl(F_GETFL)` / `fcntl(F_SETFL)`.
+pub(crate) fn clear_nonblock(fd: RawFd) -> Result<(), Errno> {
+    let flags = unsafe { syscall4(SYS_FCNTL, fd as i64, F_GETFL, 0, 0) };
+    if flags < 0 {
+        return Err(Errno(-flags as i32));
+    }
+    if flags as u64 & O_NONBLOCK == 0 {
+        return Ok(());
+    }
+    let ret = unsafe {
+        syscall4(
+            SYS_FCNTL,
+            fd as i64,
+            F_SETFL,
+            (flags as u64 & !O_NONBLOCK) as i64,
+            0,
+        )
+    };
+    syscall_unit(ret)
 }
 
 pub(crate) fn mkdirat(dirfd: RawFd, name: &CStr, mode: u32) -> Result<(), Errno> {
