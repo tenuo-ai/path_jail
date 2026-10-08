@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Linux x86_64/aarch64 `guard` operations for fd-relative directory creation,
+  file/directory removal, and rename. Parent directories are pinned with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` before the matching `*at`
+  syscall executes. `*_with` variants take `ResolveOptions` to apply
+  `no_symlinks`/`no_xdev` to parent resolution.
+- `FdJail::try_clone()` for services that need to handle file-descriptor
+  exhaustion without the panic inherent in the `Clone` trait.
+- Scheduled fuzzing of arbitrary path bytes and a privileged bind-mount test
+  for `RESOLVE_NO_XDEV`.
+
+### Fixed
+
+- Correct architecture-specific `O_NOFOLLOW` values on Linux/Android in both
+  `secure-open` and the guard fallback; incorrect constants could silently
+  follow a final symlink on ARM-family targets.
+- Correct `O_DIRECTORY`/`O_NOFOLLOW` for the openat2 path on Linux aarch64,
+  where the x86_64 values mean `O_DIRECT`/`O_LARGEFILE`. The pinned root dirfd
+  previously lacked `O_DIRECTORY | O_NOFOLLOW` on aarch64.
+- `FdJail::check_path()` now performs a point-in-time path containment check,
+  rejects traversal and symlink escapes, rejects a replaced jail root, and
+  returns the caller's path rather than a symlink-resolved one.
+- Linux `OpenOptions` now handles read+write as `O_RDWR` and rejects invalid
+  create/truncate/append access combinations consistently across platforms.
+- Path validation now propagates metadata/permission errors instead of treating
+  them as nonexistent paths.
+- On Linux, `FdJail::check_path()` resolves existing paths with the same
+  `openat2` rules as `open`, so it no longer approves absolute or magic
+  symlinks that `open` rejects. The root identity check compares device and
+  inode.
+- Guard mutations reject a trailing `/`, `/.` or `/..` instead of silently
+  acting on the normalized name (e.g. unlinking `link` for `link/`).
+- `openat2` retries transient `EAGAIN` from `..` resolution races, and an
+  `EPERM` from seccomp/LSM policy now fails `FdJail::new` with
+  `UnsupportedKernel` instead of breaking every later call.
+- The guard API accepts non-UTF-8 Unix paths.
+
+### Documentation
+
+- Correct magic-link errors to `SymlinkRejected`, compile the signing adapter
+  example, publish all-feature docs on docs.rs, and document v1 attestation
+  replay limitations.
+
 ## [0.4.0] - 2026-05-21
 
 ### Added
@@ -119,4 +165,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Symlink escape detection
 - Broken symlink rejection
 - Path traversal prevention
-

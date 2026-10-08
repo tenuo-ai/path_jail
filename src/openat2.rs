@@ -28,16 +28,43 @@ pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 pub(crate) const RESOLVE_NO_XDEV: u64 = 0x01;
 
-// O_* flags (x86_64 Linux)
+// O_* flags. Most values are shared by x86_64 and aarch64, but O_DIRECTORY
+// and O_NOFOLLOW differ: aarch64 keeps the older ARM values, where the x86_64
+// O_DIRECTORY bit means O_DIRECT and the x86_64 O_NOFOLLOW bit means O_LARGEFILE.
 pub(crate) const O_RDONLY: u64 = 0;
 pub(crate) const O_WRONLY: u64 = 1;
-#[allow(dead_code)]
 pub(crate) const O_RDWR: u64 = 2;
 pub(crate) const O_CREAT: u64 = 0o100;
 pub(crate) const O_EXCL: u64 = 0o200;
 pub(crate) const O_TRUNC: u64 = 0o1000;
 pub(crate) const O_APPEND: u64 = 0o2000;
 pub(crate) const O_CLOEXEC: u64 = 0o2000000;
+#[cfg(target_arch = "x86_64")]
+pub(crate) const O_DIRECTORY: u64 = 0o200000;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const O_DIRECTORY: u64 = 0o40000;
+#[cfg(target_arch = "x86_64")]
+pub(crate) const O_NOFOLLOW: u64 = 0o400000;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const O_NOFOLLOW: u64 = 0o100000;
+pub(crate) const O_PATH: u64 = 0o10000000;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_MKDIRAT: i64 = 258;
+#[cfg(target_arch = "aarch64")]
+const SYS_MKDIRAT: i64 = 34;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_UNLINKAT: i64 = 263;
+#[cfg(target_arch = "aarch64")]
+const SYS_UNLINKAT: i64 = 35;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_RENAMEAT2: i64 = 316;
+#[cfg(target_arch = "aarch64")]
+const SYS_RENAMEAT2: i64 = 276;
+
+pub(crate) const AT_REMOVEDIR: i32 = 0x200;
 
 // ── Errno ─────────────────────────────────────────────────────────────────────
 
@@ -46,6 +73,9 @@ pub(crate) struct Errno(pub i32);
 
 impl Errno {
     // Errno constants we care about
+    pub const EPERM: Errno = Errno(1); // Blocked by seccomp/LSM policy
+    pub const ENOENT: Errno = Errno(2); // Path component does not exist
+    pub const EAGAIN: Errno = Errno(11); // Concurrent rename/mount during `..` resolution
     pub const EXDEV: Errno = Errno(18); // Cross-device link / escape attempt
     pub const ELOOP: Errno = Errno(40); // Too many symlinks / RESOLVE_NO_SYMLINKS
     pub const ENOSYS: Errno = Errno(38); // Syscall not supported (kernel < 5.6)
@@ -65,11 +95,28 @@ impl From<Errno> for std::io::Error {
 
 // ── openat2 syscall ───────────────────────────────────────────────────────────
 
-/// Calls `openat2(2)` with the given `how` struct.
+/// Bound on `EAGAIN` retries. With `RESOLVE_BENEATH` the kernel returns
+/// `EAGAIN` when a rename or mount races `..` resolution; openat2(2) says to
+/// retry. The bound keeps a hostile rename loop from spinning us forever.
+const OPENAT2_EAGAIN_RETRIES: usize = 32;
+
+/// Calls `openat2(2)` with the given `how` struct, retrying transient `EAGAIN`.
 ///
 /// Returns `Ok(OwnedFd)` on success, `Err(Errno)` on failure.
 /// The errno value is the raw negative return value of the syscall.
 pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedFd, Errno> {
+    let mut result = openat2_once(dirfd, path, how);
+    for _ in 0..OPENAT2_EAGAIN_RETRIES {
+        if !matches!(result, Err(Errno::EAGAIN)) {
+            break;
+        }
+        std::thread::yield_now();
+        result = openat2_once(dirfd, path, how);
+    }
+    result
+}
+
+fn openat2_once(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedFd, Errno> {
     let fd = unsafe {
         syscall4(
             SYS_OPENAT2,
@@ -87,6 +134,60 @@ pub(crate) fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> Result<OwnedF
     } else {
         // SAFETY: kernel returned a valid fd ≥ 0
         Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    }
+}
+
+pub(crate) fn mkdirat(dirfd: RawFd, name: &CStr, mode: u32) -> Result<(), Errno> {
+    let ret = unsafe {
+        syscall4(
+            SYS_MKDIRAT,
+            dirfd as i64,
+            name.as_ptr() as i64,
+            mode as i64,
+            0,
+        )
+    };
+    syscall_unit(ret)
+}
+
+pub(crate) fn unlinkat(dirfd: RawFd, name: &CStr, flags: i32) -> Result<(), Errno> {
+    let ret = unsafe {
+        syscall4(
+            SYS_UNLINKAT,
+            dirfd as i64,
+            name.as_ptr() as i64,
+            flags as i64,
+            0,
+        )
+    };
+    syscall_unit(ret)
+}
+
+pub(crate) fn renameat2(
+    old_dirfd: RawFd,
+    old_name: &CStr,
+    new_dirfd: RawFd,
+    new_name: &CStr,
+    flags: u32,
+) -> Result<(), Errno> {
+    let ret = unsafe {
+        syscall5(
+            SYS_RENAMEAT2,
+            old_dirfd as i64,
+            old_name.as_ptr() as i64,
+            new_dirfd as i64,
+            new_name.as_ptr() as i64,
+            flags as i64,
+        )
+    };
+    syscall_unit(ret)
+}
+
+fn syscall_unit(ret: i64) -> Result<(), Errno> {
+    if ret < 0 {
+        Err(Errno(-ret as i32))
+    } else {
+        Ok(())
     }
 }
 
@@ -121,6 +222,25 @@ unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn syscall5(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
+    let ret: i64;
+    std::arch::asm!(
+        "syscall",
+        inlateout("rax") nr => ret,
+        in("rdi") a0,
+        in("rsi") a1,
+        in("rdx") a2,
+        in("r10") a3,
+        in("r8") a4,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack),
+    );
+    ret
+}
+
 /// aarch64 Linux variant of [`syscall4`].
 ///
 /// # Safety
@@ -146,6 +266,23 @@ unsafe fn syscall4(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
         in("x1") a1,
         in("x2") a2,
         in("x3") a3,
+        options(nostack),
+    );
+    ret
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn syscall5(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
+    let ret: i64;
+    std::arch::asm!(
+        "svc #0",
+        in("x8") nr,
+        inout("x0") a0 => ret,
+        in("x1") a1,
+        in("x2") a2,
+        in("x3") a3,
+        in("x4") a4,
         options(nostack),
     );
     ret
@@ -226,7 +363,9 @@ pub(crate) fn probe_openat2() -> Result<(), Errno> {
         let empty = c"";
         match openat2(-100i32 as RawFd, empty, &how) {
             Ok(_) => Ok(()),
-            Err(e) if e == Errno::ENOSYS => Err(e),
+            // ENOSYS: kernel < 5.6. EPERM: a seccomp/LSM policy (e.g. older
+            // container runtimes) blocks the syscall, so every later call fails.
+            Err(e) if e == Errno::ENOSYS || e == Errno::EPERM => Err(e),
             Err(_) => Ok(()), // Any other error means the syscall exists
         }
     })

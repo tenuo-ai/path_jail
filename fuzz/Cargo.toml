@@ -1,0 +1,22 @@
+[package]
+name = "path_jail-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+path_jail = { path = "..", features = ["guard"] }
+
+[[bin]]
+name = "path_inputs"
+path = "fuzz_targets/path_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

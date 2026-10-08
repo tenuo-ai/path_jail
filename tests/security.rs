@@ -680,3 +680,17 @@ fn segments_returns_jailed_path() {
     let path: JailedPath = jail.segments(["users", "bob", "photo.jpg"]).unwrap();
     assert!(path.ends_with("users/bob/photo.jpg"));
 }
+
+#[test]
+#[cfg(unix)]
+fn symlink_loop_is_reported_as_broken_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("b", dir.path().join("a")).unwrap();
+    std::os::unix::fs::symlink("a", dir.path().join("b")).unwrap();
+    let jail = path_jail::Jail::new(dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.join("a"),
+        Err(path_jail::JailError::BrokenSymlink(_))
+    ));
+}

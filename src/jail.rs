@@ -28,6 +28,14 @@ impl Jail {
         Ok(Self { root })
     }
 
+    /// Build a jail from a root that is already canonical and validated
+    /// (e.g. [`FdJail::root`](crate::guard::FdJail::root)), skipping the
+    /// `canonicalize` syscall.
+    #[cfg(all(feature = "guard", unix))]
+    pub(crate) fn from_canonical(root: PathBuf) -> Self {
+        Self { root }
+    }
+
     /// Returns the canonicalized root path.
     pub fn root(&self) -> &Path {
         &self.root
@@ -58,12 +66,7 @@ impl Jail {
             match component {
                 Component::Normal(name) => {
                     current.push(name);
-                    // If it exists, resolve symlinks and check bounds
-                    if current.exists() {
-                        current = self.verify_inside(current)?;
-                    } else if current.is_symlink() {
-                        return Err(JailError::BrokenSymlink(current));
-                    }
+                    current = self.resolve_if_present(current)?;
                 }
                 Component::ParentDir => {
                     current.pop();
@@ -75,11 +78,7 @@ impl Jail {
                         });
                     }
                     // Re-verify after pop (parent might be a symlink)
-                    if current.exists() {
-                        current = self.verify_inside(current)?;
-                    } else if current.is_symlink() {
-                        return Err(JailError::BrokenSymlink(current));
-                    }
+                    current = self.resolve_if_present(current)?;
                 }
                 Component::CurDir => {} // Ignore "."
                 Component::RootDir | Component::Prefix(_) => {
@@ -103,6 +102,26 @@ impl Jail {
             });
         }
         Ok(canonical)
+    }
+
+    /// Resolve an existing component and fail closed on metadata errors.
+    /// `Path::exists`/`is_symlink` collapse permission and I/O errors to false,
+    /// which is not acceptable for a security boundary.
+    fn resolve_if_present(&self, path: PathBuf) -> Result<PathBuf, JailError> {
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => match self.verify_inside(path.clone()) {
+                Err(JailError::Io(err))
+                    if meta.file_type().is_symlink()
+                        && (err.kind() == std::io::ErrorKind::NotFound
+                            || is_symlink_loop(&err)) =>
+                {
+                    Err(JailError::BrokenSymlink(path))
+                }
+                result => result,
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(path),
+            Err(err) => Err(JailError::Io(err)),
+        }
     }
 
     /// Verify an absolute path is inside the jail.
@@ -281,4 +300,62 @@ impl AsRef<Path> for Jail {
     fn as_ref(&self) -> &Path {
         &self.root
     }
+}
+
+/// `ErrorKind::FilesystemLoop` is unstable, so match the raw `ELOOP` errno.
+/// The value differs by OS and, on Linux, by architecture.
+fn is_symlink_loop(err: &std::io::Error) -> bool {
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6"
+        )
+    ))]
+    const ELOOP: Option<i32> = Some(90);
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "sparc", target_arch = "sparc64")
+    ))]
+    const ELOOP: Option<i32> = Some(62);
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips32r6",
+            target_arch = "mips64",
+            target_arch = "mips64r6",
+            target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
+    const ELOOP: Option<i32> = Some(40);
+    #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+    const ELOOP: Option<i32> = Some(90);
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const ELOOP: Option<i32> = Some(62);
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "illumos",
+        target_os = "solaris",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    const ELOOP: Option<i32> = None;
+
+    ELOOP.is_some() && err.raw_os_error() == ELOOP
 }

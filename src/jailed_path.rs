@@ -5,12 +5,16 @@ use std::fmt;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
-/// A path verified to be inside a [`Jail`](crate::Jail).
+/// A path verified to be inside a [`Jail`](crate::Jail) at construction time.
 ///
 /// This is a zero-cost wrapper that provides compile-time guarantees:
 /// - Can only be constructed via [`Jail::join_typed`](crate::Jail::join_typed)
 ///   or [`Jail::segments`](crate::Jail::segments)
 /// - Prevents "confused deputy" bugs where unvalidated paths are accidentally used
+///
+/// This type does not pin a file descriptor. Filesystem changes after validation
+/// can invalidate the guarantee before a later I/O operation. Use
+/// [`guard::FdJail`](crate::guard::FdJail) for atomic validate-and-open semantics.
 ///
 /// # Example
 ///
@@ -18,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// use path_jail::{Jail, JailedPath};
 ///
 /// fn save_file(path: JailedPath, data: &[u8]) -> std::io::Result<()> {
-///     // path is guaranteed to be inside the jail - no runtime check needed
+///     // Safe against untrusted path strings, but not concurrent filesystem races.
 ///     std::fs::write(&path, data)
 /// }
 ///
