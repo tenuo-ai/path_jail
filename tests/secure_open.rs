@@ -9,6 +9,33 @@ use std::fs;
 use std::io::{Read, Write};
 use tempfile::tempdir;
 
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "m68k"
+    )
+))]
+const TEST_O_NOFOLLOW: i32 = 0x8000;
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "m68k"
+    ))
+))]
+const TEST_O_NOFOLLOW: i32 = 0o0400000;
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const TEST_O_NOFOLLOW: i32 = 0x0100;
+
 #[test]
 fn open_reads_regular_file() {
     let dir = tempdir().unwrap();
@@ -53,16 +80,9 @@ fn open_with_o_nofollow_rejects_internal_symlink() {
     std::os::unix::fs::symlink(&real_file, &link).unwrap();
 
     // Open the symlink directly with O_NOFOLLOW (not via jail)
-    #[cfg(target_os = "linux")]
-    const O_NOFOLLOW: i32 = 0o0400000;
-    #[cfg(target_os = "macos")]
-    const O_NOFOLLOW: i32 = 0x0100;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    const O_NOFOLLOW: i32 = 0x0100;
-
     let result = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(TEST_O_NOFOLLOW)
         .open(&link);
 
     // Should fail because the path is a symlink
@@ -233,16 +253,9 @@ fn open_blocks_symlink_swap_attack() {
     // After the swap, that location is now a symlink
     // O_NOFOLLOW protects us here
 
-    #[cfg(target_os = "linux")]
-    const O_NOFOLLOW: i32 = 0o0400000;
-    #[cfg(target_os = "macos")]
-    const O_NOFOLLOW: i32 = 0x0100;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    const O_NOFOLLOW: i32 = 0x0100;
-
     let result = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(TEST_O_NOFOLLOW)
         .open(&safe_path);
 
     // On the original path (target.txt), this would fail because it's a symlink
