@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- README: a "Choosing an API" table that links each layer (`Jail`,
+  `secure-open`, `guard`) to its threat-model section, and a single
+  "Platform support" matrix (feature × kernel × architecture × OS, plus what CI
+  runs) that SECURITY.md and DESIGN.md now point to.
+- Guarded download and append examples. The upload example compiles on every
+  Unix target (`create_dir` is behind a `cfg`). The `guard` example no longer
+  asserts `toctou_safe` (which fails on the fallback) and imports `Write`.
+- New guides: [migrating to the guard API](docs/guides/migrating.md) (read,
+  create, overwrite, append, rename, replace, error mapping) and
+  [Tokio](docs/guides/tokio.md) (blocking-pool opens, `File::from_std`,
+  timeouts and cancellation, error propagation, what blocks).
+- Every `rust` block in the README and guides is compiled in CI from
+  `doc-examples/` or explicitly marked `rust,ignore`;
+  `scripts/check_doc_examples.py` keeps them identical.
+- `#![warn(missing_docs)]`, with field docs on every `JailError` variant and
+  `# Errors` / `# Security` sections on the public entry points. `JailedFile`
+  no longer claims TOCTOU safety beyond the final component. CI builds docs
+  with `-D warnings`.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

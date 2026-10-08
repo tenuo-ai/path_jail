@@ -22,7 +22,7 @@ cargo add path_jail
 
 The standard approach fails for new files:
 
-```rust
+```rust,ignore
 // This breaks if the file doesn't exist yet!
 let path = root.join(user_input).canonicalize()?;
 if !path.starts_with(&root) {
@@ -32,7 +32,7 @@ if !path.starts_with(&root) {
 
 ## The Solution
 
-```rust
+```rust,ignore
 // One-liner for simple cases: validates the untrusted string
 let path = path_jail::join("/var/uploads", user_input)?;
 // The write is a separate lookup. If other processes can change the tree,
@@ -45,13 +45,49 @@ path_jail::join("/var/uploads", "../../etc/passwd")?;
 
 For multiple paths, create a `Jail` and reuse it:
 
-```rust
+```rust,ignore
 use path_jail::Jail;
 
 let jail = Jail::new("/var/uploads")?;
 let path1 = jail.join("report.pdf")?;
 let path2 = jail.join("data.csv")?;
 ```
+
+## Choosing an API
+
+path_jail has three layers. Each one adds to the one before it; pick the
+strongest your platform supports. The [threat model](SECURITY.md#what-each-api-defends-against)
+lists exactly what each layer does and does not defend against.
+
+| Layer | You get | Guarantee | Use when |
+|-------|---------|-----------|----------|
+| [`Jail`](#api) (default) | A validated `PathBuf` | The **string** resolves inside the root at the moment you call `join`. You open it later with `std::fs`, so another process can swap a symlink in between. | Only your service writes to the tree, or you need a path for logging, storage keys, or display |
+| [`secure-open`](#secure-open--o_nofollow-protection-all-unix) | A `JailedFile` | Validation, then an open with `O_NOFOLLOW`: the **final component** cannot be a swapped-in symlink. Intermediate directories can still be swapped. | Unix without the `guard` feature |
+| [`guard`](#guard--kernel-enforced-toctou-safety-linux-56) | A `GuardedFile` (a descriptor, not a path) | Linux 5.6+ x86_64/aarch64: **one `openat2` call** resolves and opens beneath a pinned root, so nothing can race it. Elsewhere: the `secure-open` guarantee, reported as `attestation().toctou_safe == false`. Optional checks on the opened handle reject FIFOs, devices, directories, and hard links. | Untrusted users or processes can modify the tree |
+
+Moving existing code over? See [Migrating to the guard API](docs/guides/migrating.md).
+Using Tokio? See [Async (Tokio)](docs/guides/tokio.md).
+
+## Platform support
+
+This is the single support matrix for the crate; other documents link here.
+
+| | Linux 5.6+, x86_64/aarch64 | Linux < 5.6 (or `openat2` blocked by seccomp), x86_64/aarch64 | Other Linux architectures¹, Android | macOS, FreeBSD, NetBSD, OpenBSD, DragonFly | Windows | Other Unix (illumos, Solaris, …) |
+|---|---|---|---|---|---|---|
+| `Jail` (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `secure-open` | ✅ | ✅ | ✅ | ✅ | feature is a no-op | compile error² |
+| `guard`: `FdJail::open` / `create` | ✅ atomic (`toctou_safe = true`) | `FdJail::new` → `UnsupportedKernel` | fallback (`toctou_safe = false`) | fallback (`toctou_safe = false`) | not available | compile error² |
+| `guard`: `create_dir`, `remove_file`, `remove_dir`, `rename` | ✅ | — | not available³ | not available³ | — | — |
+| `guard`: `require_regular_file`, `reject_hard_links` | ✅ | — | ✅ | ✅ | — | — |
+| `guard`: `no_symlinks`, `no_xdev` | ✅ enforced | — | no-op | no-op | — | — |
+
+1. armv7, i686, riscv64, powerpc, powerpc64, s390x, loongarch64, mips, sparc and other Linux targets with a known `O_NOFOLLOW` value.
+2. The `O_*` flag values are unknown there, so the crate refuses to build an unsafe fallback rather than guess.
+3. A pathname-based fallback would reintroduce the race these methods exist to avoid, so they are compiled only where they are kernel-enforced.
+
+CI runs the full test suite on Linux x86_64 and aarch64, macOS, Windows, and
+FreeBSD, and under QEMU on armv7, i686, powerpc, powerpc64le, riscv64, and
+s390x. Android, NetBSD, loongarch64, sparc64, and illumos are compile-checked.
 
 ## Features
 
@@ -62,7 +98,7 @@ let path2 = jail.join("data.csv")?;
 - **Segment joining** - safely build paths from user IDs, filenames, etc.
 - **Helpful errors** - tells you what went wrong and why
 - **`secure-open` feature** (Unix) - `O_NOFOLLOW`-protected opens; zero extra deps
-- **`guard` feature** (Linux 5.6+) - kernel-enforced TOCTOU safety via `openat2(RESOLVE_BENEATH)`; `O_NOFOLLOW` fallback on macOS/BSD
+- **`guard` feature** (Unix) - fd-pinned opens with handle checks; kernel-enforced via `openat2(RESOLVE_BENEATH)` on Linux 5.6+ x86_64/aarch64, `O_NOFOLLOW` fallback elsewhere ([support matrix](#platform-support))
 
 ## Security
 
@@ -112,7 +148,7 @@ Hard links cannot be detected by path inspection. If an attacker has shell acces
 
 If an attacker can mount a filesystem inside the jail, they can escape:
 
-```rust
+```rust,ignore
 let jail = Jail::new("/var/uploads")?;
 // Attacker (with root): mount /dev/sda1 /var/uploads/mnt
 jail.join("mnt/etc/passwd")?;  // Passes check, but accesses root filesystem!
@@ -130,7 +166,7 @@ Detecting mount points would require `stat()` on every path component (expensive
 
 path_jail validates paths at call time. A symlink could be created between validation and use:
 
-```rust
+```rust,ignore
 let path = jail.join("file.txt")?;  // Validated
 // Attacker creates symlink here
 std::fs::write(&path, data)?;        // Escapes!
@@ -145,7 +181,7 @@ std::fs::write(&path, data)?;        // Escapes!
 
 On Windows, filenames like `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` are special device names.
 
-```rust
+```rust,ignore
 let path = jail.join("CON.txt")?;   // Returns C:\uploads\CON.txt
 std::fs::File::open(&path)?;         // Opens console device, not file!
 ```
@@ -160,7 +196,7 @@ macOS automatically converts filenames to NFD (decomposed) form. A file saved as
 
 path_jail handles this correctly (all paths are canonicalized). The issue arises when storing paths externally:
 
-```rust
+```rust,ignore
 let user_input = "café";  // NFC from web form
 let jail = Jail::new(format!("/uploads/{}", user_input))?;
 
@@ -179,14 +215,14 @@ Windows and macOS (by default) have case-insensitive filesystems.
 
 path_jail handles this correctly for existing paths because `canonicalize()` normalizes case to what's on disk:
 
-```rust
+```rust,ignore
 let jail = Jail::new("/var/Uploads")?;           // Canonicalized
 jail.contains("/var/uploads/file.txt")?;          // Also canonicalized - works!
 ```
 
 The issue is for blocklist checks on user input before calling path_jail:
 
-```rust
+```rust,ignore
 let blocklist = ["secret.txt"];
 let input = "SECRET.TXT";
 
@@ -203,7 +239,7 @@ if blocklist.contains(&input.to_lowercase().as_str()) { /* matches */ }
 
 Windows silently strips trailing dots and spaces:
 
-```rust
+```rust,ignore
 jail.join("file.txt.")?;   // Becomes "file.txt"
 jail.join("file.txt ")?;   // Becomes "file.txt"
 ```
@@ -218,7 +254,7 @@ NTFS supports alternate data streams: `file.txt:hidden`. Consider rejecting file
 
 Filenames can contain Unicode control characters that manipulate display:
 
-```rust
+```rust,ignore
 jail.join("\u{202E}txt.exe")?;  // Right-to-left override: displays as "exe.txt"
 ```
 
@@ -228,7 +264,7 @@ path_jail passes these through (they're valid filenames). This is a UI attack, n
 
 `/proc` and `/dev` contain symlinks that can escape any jail:
 
-```rust
+```rust,ignore
 let jail = Jail::new("/proc")?;
 jail.join("self/root/etc/passwd")?;  // /proc/self/root → /
 ```
@@ -239,7 +275,7 @@ path_jail catches this via symlink resolution (the above returns `EscapedRoot`).
 
 All returned paths are canonicalized (symlinks resolved, `..` eliminated):
 
-```rust
+```rust,ignore
 // macOS: /var is a symlink to /private/var
 let jail = Jail::new("/var/uploads")?;
 assert!(jail.root().starts_with("/private/var"));
@@ -256,6 +292,7 @@ When comparing paths, always canonicalize your expected values.
 
 ### One-shot validation
 
+<!-- example: doc-examples/examples/one_shot.rs#readme -->
 ```rust
 // Validate and join in one call
 let safe: PathBuf = path_jail::join("/var/uploads", "subdir/file.txt")?;
@@ -263,6 +300,7 @@ let safe: PathBuf = path_jail::join("/var/uploads", "subdir/file.txt")?;
 
 ### Reusable jail
 
+<!-- example: doc-examples/examples/reusable_jail.rs#readme -->
 ```rust
 use path_jail::Jail;
 
@@ -275,17 +313,18 @@ let root: &Path = jail.root();
 // Safely join a relative path
 let path: PathBuf = jail.join("subdir/file.txt")?;
 
-// Check if an absolute path is inside the jail
+// Check if an absolute path is inside the jail (the path must exist)
 let verified: PathBuf = jail.contains("/var/uploads/file.txt")?;
 
-// Get relative path for database storage
-let rel: PathBuf = jail.relative(&path)?;  // "subdir/file.txt"
+// Get relative path for database storage (the path must exist)
+let rel: PathBuf = jail.relative(&verified)?; // "file.txt"
 ```
 
 ### Type-safe paths
 
 Use `JailedPath` for compile-time guarantees:
 
+<!-- example: doc-examples/examples/typed_paths.rs#readme -->
 ```rust
 use path_jail::{Jail, JailedPath};
 
@@ -304,35 +343,40 @@ save_upload(path, b"data")?;
 
 Safely build paths from multiple user inputs:
 
+<!-- example: doc-examples/examples/segments.rs#readme -->
 ```rust
-use path_jail::Jail;
+use path_jail::{Jail, JailedPath};
 
 let jail = Jail::new("/var/uploads")?;
 let user_id = "alice";
 let filename = "photo.jpg";
 
-// Safe: each segment is validated (no /, \, or .. allowed in segments)
+// Each segment must be one name: no `/`, `\`, `..`, or null bytes
 let path = jail.join_segments([user_id, "files", filename])?;
 
-// These would fail:
-// jail.join_segments(["../etc", "passwd"])?;     // ".." rejected
-// jail.join_segments(["users/files"])?;          // "/" in segment rejected
+// These fail:
+assert!(jail.join_segments(["../etc", "passwd"]).is_err()); // ".." rejected
+assert!(jail.join_segments(["users/files"]).is_err()); // "/" in a segment rejected
 
 // Type-safe version:
-let path: JailedPath = jail.segments([user_id, "files", filename])?;
+let typed: JailedPath = jail.segments([user_id, "files", filename])?;
 ```
 
 ## Error Handling
 
 ### Construction errors
 
+<!-- example: doc-examples/examples/construction_errors.rs#readme -->
 ```rust
 use path_jail::{Jail, JailError};
 
 match Jail::new("/var/uploads") {
-    Ok(jail) => { /* use jail */ }
+    Ok(jail) => {
+        /* use jail */
+        let _ = jail;
+    }
     Err(JailError::InvalidRoot { path, .. }) => {
-        // Tried to use filesystem root (/, C:\) or non-directory
+        // Filesystem root (/, C:\) or not a directory
         panic!("Config error: {}", path.display());
     }
     Err(JailError::Io(e)) => {
@@ -340,12 +384,13 @@ match Jail::new("/var/uploads") {
         // reports this case as `InvalidRoot` with `source: Some(e)` instead.)
         panic!("Config error: {}", e);
     }
-    Err(e) => panic!("Unexpected error: {}", e),  // Future-proof
+    Err(e) => panic!("Unexpected error: {}", e), // Future-proof (non_exhaustive)
 }
 ```
 
 ### Path validation errors
 
+<!-- example: doc-examples/examples/validation_errors.rs#readme -->
 ```rust
 use path_jail::{Jail, JailError};
 
@@ -353,39 +398,44 @@ let jail = Jail::new("/var/uploads")?;
 
 match jail.join(user_input) {
     Ok(path) => {
-        // Validated. The write is a separate step; see TOCTOU-Safe File
+        // Validated. The write is a separate lookup; see TOCTOU-Safe File
         // Operations if other processes can change the tree concurrently.
         std::fs::write(&path, data)?;
     }
     Err(JailError::EscapedRoot { attempted, root }) => {
-        // Path traversal attempt
-        eprintln!("Blocked: {} escapes {}", attempted.display(), root.display());
+        // Path traversal or symlink escape
+        eprintln!(
+            "Blocked: {} escapes {}",
+            attempted.display(),
+            root.display()
+        );
     }
     Err(JailError::BrokenSymlink(path)) => {
         // Symlink target doesn't exist (can't verify it's safe)
         eprintln!("Broken symlink: {}", path.display());
     }
     Err(JailError::InvalidPath(reason)) => {
-        // Absolute path or other invalid input
+        // Absolute path, null byte, or other invalid input
         eprintln!("Invalid: {}", reason);
     }
     Err(JailError::Io(e)) => {
-        // Filesystem error (e.g., permission denied)
+        // A component couldn't be inspected (e.g. permission denied).
+        // Fail closed: treat it as a rejection, not as a missing file.
         eprintln!("I/O error: {}", e);
     }
-    Err(e) => eprintln!("Error: {}", e),  // Future-proof (non_exhaustive)
+    Err(e) => eprintln!("Error: {}", e), // Future-proof (non_exhaustive)
 }
 ```
 
 ## Example: File Uploads
 
-This example targets **Linux 5.6+ on x86_64/aarch64**, where the `guard`
-feature resolves and opens in one `openat2` call, so nothing can swap a
-symlink in between. On macOS/BSD and other Linux architectures, `FdJail::open`
-falls back to a non-atomic `O_NOFOLLOW` open (`attestation().toctou_safe` is
-`false`) and `create_dir` does not exist; drop the `create_dir` call and
-pre-create user directories there.
+With the `guard` feature, the untrusted name is resolved and opened beneath the
+pinned root, and the checks run on the handle that was opened. On Linux 5.6+
+x86_64/aarch64 that is one `openat2` call; elsewhere it is the `O_NOFOLLOW`
+fallback (see [Platform support](#platform-support)), and `create_dir` is not
+compiled, so create per-user directories out of band there.
 
+<!-- example: doc-examples/examples/guarded_upload.rs#readme -->
 ```rust
 use path_jail::guard::{FdJail, OpenOptions};
 use path_jail::JailError;
@@ -399,20 +449,28 @@ struct UploadService {
 /// another user's directory with `..` or `/`.
 fn plain_name(s: &str) -> Result<&str, JailError> {
     if s.is_empty() || s == "." || s == ".." || s.contains('/') || s.contains('\0') {
-        return Err(JailError::InvalidPath(format!("not a plain file name: {s:?}")));
+        return Err(JailError::InvalidPath(format!(
+            "not a plain file name: {s:?}"
+        )));
     }
     Ok(s)
 }
 
 impl UploadService {
     fn new(root: &str) -> Result<Self, JailError> {
-        Ok(Self { jail: FdJail::new(root)? })
+        Ok(Self {
+            jail: FdJail::new(root)?,
+        })
     }
 
     fn save(&self, user_id: &str, filename: &str, data: &[u8]) -> Result<(), JailError> {
         let user_dir = plain_name(user_id)?;
-        // fd-relative mkdir (Linux x86_64/aarch64). Elsewhere, pre-create
-        // per-user directories out of band.
+        // fd-relative mkdir exists only where the open is kernel-enforced.
+        // Elsewhere, create per-user directories out of band.
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         match self.jail.create_dir(user_dir) {
             Ok(()) => {}
             Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -423,8 +481,8 @@ impl UploadService {
             format!("{user_dir}/{}", plain_name(filename)?),
             OpenOptions::new()
                 .write(true)
-                .create_new(true)          // never overwrite an existing upload
-                .no_symlinks(true)         // no symlinked user directories
+                .create_new(true) // never overwrite an existing upload
+                .no_symlinks(true) // no symlinked user directories (Linux)
                 .require_regular_file(true)
                 .reject_hard_links(true),
         )?;
@@ -439,6 +497,57 @@ that follows is a separate pathname lookup. That is fine when only your
 service writes to the tree; see [TOCTOU Race Conditions](#toctou-race-conditions)
 otherwise.
 
+## Example: File Downloads
+
+Read from the handle that was checked. Never validate a path and then reopen it.
+
+<!-- example: doc-examples/examples/guarded_download.rs#readme -->
+```rust
+use path_jail::guard::{FdJail, OpenOptions};
+use path_jail::JailError;
+use std::io::Write;
+
+/// Stream an untrusted relative path from the jail into `out`.
+fn download(jail: &FdJail, name: &str, out: &mut impl Write) -> Result<u64, JailError> {
+    let mut file = jail.open(
+        name,
+        OpenOptions::new()
+            .read(true)
+            .require_regular_file(true) // a FIFO or device is rejected, not read
+            .reject_hard_links(true), // a link to an inode outside the jail is rejected
+    )?;
+    // Read from the handle that was checked. Never reopen the path.
+    Ok(std::io::copy(&mut file, out)?)
+}
+```
+
+## Example: Appending to a Log
+
+<!-- example: doc-examples/examples/guarded_append.rs#readme -->
+```rust
+use path_jail::guard::{FdJail, OpenOptions};
+use path_jail::JailError;
+use std::io::Write;
+
+/// Append one line to a per-job log inside the jail.
+fn append_line(jail: &FdJail, log: &str, line: &str) -> Result<(), JailError> {
+    let mut file = jail.open(
+        log,
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .require_regular_file(true)
+            .reject_hard_links(true),
+    )?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+```
+
+To replace a file without writing through whatever currently sits at its name,
+write a new file and `rename` it into place; see
+[Migrating to the guard API](docs/guides/migrating.md#replace-a-file).
+
 ## Framework Integration
 
 These examples use the `guard` feature
@@ -446,10 +555,12 @@ These examples use the `guard` feature
 Unix. The open is atomic and kernel-enforced on Linux 5.6+ x86_64/aarch64; on
 other Unix targets it uses the `O_NOFOLLOW` fallback, which protects only the
 final component. Guarded opens and writes are blocking calls, so they run off
-the async executor.
+the async executor. The [Tokio guide](docs/guides/tokio.md) covers streaming,
+timeouts, and error mapping.
 
 ### Axum
 
+<!-- example: doc-examples/examples/axum_upload.rs#readme -->
 ```rust
 use axum::{extract::Path, http::StatusCode, response::IntoResponse};
 use bytes::Bytes;
@@ -458,9 +569,8 @@ use path_jail::JailError;
 use std::io::Write;
 use std::sync::LazyLock;
 
-static UPLOADS: LazyLock<FdJail> = LazyLock::new(|| {
-    FdJail::new("/var/uploads").expect("uploads dir must exist")
-});
+static UPLOADS: LazyLock<FdJail> =
+    LazyLock::new(|| FdJail::new("/var/uploads").expect("uploads dir must exist"));
 
 async fn upload(
     Path(filename): Path<String>,
@@ -495,6 +605,7 @@ async fn upload(
 
 ### Actix-web
 
+<!-- example: doc-examples/examples/actix_upload.rs#readme -->
 ```rust
 use actix_web::{error, web, HttpResponse, Result};
 use path_jail::guard::{FdJail, OpenOptions};
@@ -502,9 +613,8 @@ use path_jail::JailError;
 use std::io::Write;
 use std::sync::LazyLock;
 
-static UPLOADS: LazyLock<FdJail> = LazyLock::new(|| {
-    FdJail::new("/var/uploads").expect("uploads dir must exist")
-});
+static UPLOADS: LazyLock<FdJail> =
+    LazyLock::new(|| FdJail::new("/var/uploads").expect("uploads dir must exist"));
 
 async fn upload(path: web::Path<String>, body: web::Bytes) -> Result<HttpResponse> {
     let filename = path.into_inner();
@@ -544,24 +654,25 @@ Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations:
 path_jail = { version = "0.5", features = ["secure-open"] }
 ```
 
+<!-- example: doc-examples/examples/secure_open.rs#readme -->
 ```rust
 use path_jail::Jail;
 use std::io::{Read, Write};
 
 let jail = Jail::new("/var/uploads")?;
 
-// Open with O_NOFOLLOW - fails if path is a symlink
+// Open with O_NOFOLLOW - fails if the final component is a symlink
 let mut file = jail.open("config.txt")?;
 let mut contents = String::new();
 file.read_to_string(&mut contents)?;
 
-// Create with O_CREAT | O_EXCL | O_NOFOLLOW - fails if file exists or is symlink
+// Create with O_CREAT | O_EXCL | O_NOFOLLOW - fails if the file exists or is a symlink
 let mut file = jail.create("new.txt")?;
 file.write_all(b"hello")?;
 
 // Other options
-let file = jail.create_or_truncate("data.txt")?;  // Truncate if exists
-let file = jail.open_append("log.txt")?;           // Append mode
+let data_file = jail.create_or_truncate("data.txt")?; // Truncate if exists
+let log_file = jail.open_append("log.txt")?; // Append mode
 ```
 
 This protects against symlink swap attacks on the **final path component**. Zero additional dependencies.
@@ -572,30 +683,31 @@ This protects against symlink swap attacks on the **final path component**. Zero
 
 ### `guard` — Kernel-enforced TOCTOU safety (Linux 5.6+)
 
-The `guard` feature uses a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall. Because the validate-and-open is **atomic at the kernel level**, there is no window for a race condition:
+On Linux 5.6+ x86_64/aarch64, the `guard` feature resolves and opens with a single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall. Because the validate-and-open is **atomic at the kernel level**, there is no window for a race condition. Other Unix targets use the `O_NOFOLLOW` fallback; see [Platform support](#platform-support).
 
 ```toml
 [dependencies]
 path_jail = { version = "0.5", features = ["guard"] }
 ```
 
+<!-- example: doc-examples/examples/guard_open.rs#readme -->
 ```rust
 use path_jail::guard::{FdJail, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 
 // Pin the jail root as a file descriptor — renames of the root after this
 // point are invisible to the jail.
 let jail = FdJail::new("/var/uploads")?;
 
-// TOCTOU-safe open: one syscall, kernel-enforced containment
+// On Linux 5.6+ x86_64/aarch64: one openat2 syscall, kernel-enforced containment
 let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
 let mut buf = Vec::new();
 jf.read_to_end(&mut buf)?;
 
 // Every open captures an Attestation with inode, device, nlink, and timestamp
 let att = jf.attestation();
-assert!(att.toctou_safe);            // true on Linux 5.6+
-assert!(att.signature.is_none());    // None until Ed25519 key is configured
+println!("kernel-enforced: {}", att.toctou_safe); // false on the O_NOFOLLOW fallback
+assert!(att.signature.is_none()); // None until you sign it with your own Signer
 
 // Untrusted trees: require a regular file and refuse hard links. Both checks
 // run on the opened handle (fstat), not on a re-resolved path.
@@ -604,7 +716,7 @@ let upload = jail.open(
     OpenOptions::new()
         .read(true)
         .require_regular_file(true) // FIFOs, devices, dirs → FileTypeRejected
-        .reject_hard_links(true),   // nlink > 1 → HardLinkRejected
+        .reject_hard_links(true), // nlink > 1 → HardLinkRejected
 )?;
 
 // Create a new file — fails if it already exists
@@ -618,6 +730,7 @@ to an `O_NOFOLLOW`-based open (same protection as `secure-open`).
 
 On Linux x86_64/aarch64, guarded mutations stay fd-relative as well:
 
+<!-- example: doc-examples/examples/guard_mutations.rs#readme -->
 ```rust
 jail.create_dir("work")?;
 jail.rename("incoming/report.pdf", "work/report.pdf")?;
@@ -665,19 +778,21 @@ pathname-based fallback would reintroduce the race they are designed to avoid.
 
 ## Thread Safety
 
-`Jail` implements `Clone`, `Send`, and `Sync`. It can be safely shared across threads:
+`Jail` implements `Clone`, `Send`, and `Sync`. It can be safely shared across threads.
+`guard::FdJail` is `Send + Sync` too; share it with `Arc`, or use
+`FdJail::try_clone` to duplicate the pinned descriptor without panicking when
+the process is out of file descriptors.
 
+<!-- example: doc-examples/examples/thread_safety.rs#readme -->
 ```rust
-use std::sync::Arc;
 use path_jail::Jail;
+use std::sync::Arc;
 
 let jail = Arc::new(Jail::new("/var/uploads")?);
 
 let jail_clone = Arc::clone(&jail);
-std::thread::spawn(move || {
-    let path = jail_clone.join("file.txt").unwrap();
-    // ...
-});
+let handle = std::thread::spawn(move || jail_clone.join("file.txt"));
+let path = handle.join().expect("thread panicked")?;
 ```
 
 ## MSRV
@@ -693,8 +808,16 @@ This crate is maintained by [Tenuo](https://tenuo.ai). Contributions are welcome
 ```bash
 git clone https://github.com/tenuo-ai/path_jail.git
 cd path_jail
-cargo test
-cargo clippy
+cargo test --all-features
+cargo clippy --all-features --all-targets -- -D warnings
+```
+
+Rust examples in this README and in `docs/guides/` are compiled from
+`doc-examples/examples/`. Edit the example file, then sync and check:
+
+```bash
+python3 scripts/check_doc_examples.py --fix
+cargo build --manifest-path doc-examples/Cargo.toml --examples
 ```
 
 ## License

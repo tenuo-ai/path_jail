@@ -118,11 +118,13 @@ compile_error!(
 ))]
 compile_error!("path_jail secure-open: O_NOFOLLOW is not known for this Linux architecture");
 
-/// A file opened with TOCTOU-safe semantics.
+/// A file opened with `O_NOFOLLOW` after path validation (`secure-open`).
 ///
 /// This is a thin wrapper around [`std::fs::File`] that guarantees the file
-/// was opened with `O_NOFOLLOW`, preventing symlink attacks on the final path
-/// component.
+/// was opened with `O_NOFOLLOW`, preventing a symlink swapped in at the
+/// **final** path component. Intermediate directories can still be swapped
+/// between validation and open; the `guard` feature closes that gap. See the
+/// [threat model](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against).
 #[derive(Debug)]
 pub struct JailedFile {
     inner: File,
@@ -205,6 +207,14 @@ impl Jail {
     /// - The file doesn't exist
     /// - The file is a symlink (blocked by `O_NOFOLLOW`)
     /// - Permission denied
+    ///
+    /// # Security
+    ///
+    /// `O_NOFOLLOW` protects the final component only: a directory earlier in the
+    /// path can still be swapped for a symlink between validation and open. The
+    /// open also follows hard links and blocks on a FIFO until a writer appears.
+    /// The `guard` feature closes these gaps; see the
+    /// [threat model](https://github.com/tenuo-ai/path_jail/blob/main/SECURITY.md#what-each-api-defends-against).
     pub fn open<P: AsRef<Path>>(&self, relative: P) -> Result<JailedFile, JailError> {
         let path = self.join(relative)?;
         let file = OpenOptions::new()
@@ -263,6 +273,19 @@ impl Jail {
     /// file.write_all(b"overwritten")?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// - The path would escape the jail ([`JailError::EscapedRoot`] and the other [`Jail::join`] errors).
+    /// - The final component is a symlink (blocked by `O_NOFOLLOW`).
+    /// - The parent directory doesn't exist, or permission is denied ([`JailError::Io`]).
+    ///
+    /// # Security
+    ///
+    /// The truncate happens inside `open`, before you can inspect the file: if the
+    /// name is a hard link to a file outside the jail, that file is emptied. Use
+    /// `guard::OpenOptions::reject_hard_links`, which defers the truncate, when hard
+    /// links are a concern. The final-component-only limitation of [`open`](Self::open) applies.
     pub fn create_or_truncate<P: AsRef<Path>>(&self, relative: P) -> Result<JailedFile, JailError> {
         let path = self.join(relative)?;
         let file = OpenOptions::new()
@@ -277,6 +300,13 @@ impl Jail {
     /// Open a file for appending.
     ///
     /// Uses `O_NOFOLLOW` to prevent symlink attacks.
+    ///
+    /// Creates the file if it is missing.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`create_or_truncate`](Self::create_or_truncate). The
+    /// final-component-only limitation of [`open`](Self::open) applies.
     pub fn open_append<P: AsRef<Path>>(&self, relative: P) -> Result<JailedFile, JailError> {
         let path = self.join(relative)?;
         let file = OpenOptions::new()
@@ -291,7 +321,13 @@ impl Jail {
 impl JailedPath {
     /// Open this path for reading with `O_NOFOLLOW` protection.
     ///
-    /// See [`Jail::open`] for details.
+    /// See [`Jail::open`] for details. The path is the one validated when this
+    /// `JailedPath` was built; it is not validated again.
+    ///
+    /// # Errors
+    ///
+    /// The I/O errors of [`Jail::open`] ([`JailError::Io`]), including a final
+    /// component that is now a symlink.
     pub fn open(&self) -> Result<JailedFile, JailError> {
         let file = OpenOptions::new()
             .read(true)
@@ -302,7 +338,13 @@ impl JailedPath {
 
     /// Create a new file at this path with `O_NOFOLLOW | O_CREAT | O_EXCL`.
     ///
-    /// See [`Jail::create`] for details.
+    /// See [`Jail::create`] for details. The path is the one validated when this
+    /// `JailedPath` was built; it is not validated again.
+    ///
+    /// # Errors
+    ///
+    /// The I/O errors of [`Jail::create`] ([`JailError::Io`]), including a final
+    /// component that is now a symlink.
     pub fn create(&self) -> Result<JailedFile, JailError> {
         let file = OpenOptions::new()
             .write(true)
