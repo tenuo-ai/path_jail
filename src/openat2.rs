@@ -74,7 +74,6 @@ const SYS_RENAMEAT2: i64 = 316;
 const SYS_RENAMEAT2: i64 = 276;
 
 pub(crate) const AT_REMOVEDIR: i32 = 0x200;
-pub(crate) const RENAME_NOREPLACE: u32 = 1;
 
 // ── Errno ─────────────────────────────────────────────────────────────────────
 

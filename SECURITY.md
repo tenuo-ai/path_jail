@@ -102,10 +102,7 @@ Footnotes:
    available only on Linux x86_64/aarch64. They pin parent directories beneath
    the jail before issuing fd-relative mutation syscalls. `create_dir_all`
    additionally validates existing components with `O_PATH | O_DIRECTORY`.
-   After the syscall each path is resolved again from the root, and the call
-   fails with `JailError::Escape` (undoing creations and renames) if a parent
-   is no longer found there. Making the jail root its own mount point prevents
-   directories from being moved out of it. They are omitted on fallback targets rather than exposing a racy pathname
+   They are omitted on fallback targets rather than exposing a racy pathname
    implementation.
 7. Opt in with `OpenOptions::require_regular_file(true)`: a directory, FIFO
    or device node that the OS lets us open fails with
