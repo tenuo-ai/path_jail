@@ -286,7 +286,9 @@ privileged processes.
 On Linux x86_64 and aarch64, `FdJail` also provides `create_dir`, `create_dir_all`, `remove_file`,
 `remove_dir`, and `rename`. Each mutation opens the parent directory with
 `openat2(O_PATH | O_DIRECTORY, RESOLVE_BENEATH)` and then issues the matching `*at` syscall on that
-pinned parent, so a concurrent rename of a parent directory cannot redirect the operation.
+pinned parent, so a concurrent rename of a parent directory cannot redirect the lookup.
+`create_dir` and `create_dir_all` then resolve the created path again from the root and, if it does
+not lead to the new directory, remove it and return `Escape`.
 `create_dir_all` checks existing components with `O_PATH | O_DIRECTORY`, requiring neither read nor
 write access and rejecting non-directory entries without opening them for I/O. The `_with` variants
 take `ResolveOptions` to also reject symlinks or mount crossings during resolution.
