@@ -1450,7 +1450,10 @@ impl FdJail {
     ///
     /// Available on Linux x86_64/aarch64. The parent path is resolved with
     /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and pinned before
-    /// `mkdirat(2)` executes, so concurrent parent renames cannot redirect it.
+    /// `mkdirat(2)` executes, so renaming or replacing a component of the
+    /// path afterwards cannot redirect it. The pinned parent is the target
+    /// even if another process moves it out of the jail before the syscall;
+    /// see the guarded-mutations notes in `SECURITY.md`.
     ///
     /// # Errors
     ///
@@ -1494,8 +1497,9 @@ impl FdJail {
     /// [`std::io::ErrorKind::NotFound`]: the name exists, so it cannot be
     /// created, but it does not resolve to a directory.
     ///
-    /// Available only on Linux x86_64/aarch64, where every resolution and
-    /// mutation is kernel-enforced beneath the jail root.
+    /// Available only on Linux x86_64/aarch64, where every path resolution is
+    /// kernel-confined beneath the jail root. Each component is created in a
+    /// pinned parent, with the same guarantee as [`create_dir`](Self::create_dir).
     ///
     /// # Errors
     ///
