@@ -814,6 +814,8 @@ fn create_dir_all_creates_nested_directories_and_is_idempotent() {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn create_dir_all_accepts_searchable_non_writable_ancestors() {
+    // Only meaningful when not running as root: root bypasses the 0o555 mode,
+    // so the test still passes but no longer exercises the permission check.
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempdir().unwrap();
@@ -865,6 +867,23 @@ fn create_dir_all_rejects_non_directory_components_without_blocking() {
         result,
         Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory
     ));
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn create_dir_all_rejects_dangling_symlink_component() {
+    let dir = tempdir().unwrap();
+    std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.create_dir_all("dangling/child"),
+        Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(!dir.path().join("missing").exists());
 }
 
 #[test]

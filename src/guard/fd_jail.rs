@@ -844,14 +844,6 @@ mod linux_impl {
         openat2(dirfd.as_raw_fd(), &cpath, &how).map_err(|e| map_errno_to_jail_error(e, path))
     }
 
-    fn open_parent(
-        dirfd: &OwnedFd,
-        parent: &Path,
-        opts: &ResolveOptions,
-    ) -> Result<OwnedFd, JailError> {
-        open_directory(dirfd, parent, opts)
-    }
-
     pub(crate) fn create_dir(
         dirfd: &OwnedFd,
         path: &Path,
@@ -859,7 +851,7 @@ mod linux_impl {
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent, opts)?;
+        let parent = open_directory(dirfd, parent, opts)?;
         mkdirat(parent.as_raw_fd(), &name, mode & 0o7777).map_err(|e| JailError::Io(e.into()))
     }
 
@@ -900,7 +892,7 @@ mod linux_impl {
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent, opts)?;
+        let parent = open_directory(dirfd, parent, opts)?;
         unlinkat(parent.as_raw_fd(), &name, 0).map_err(|e| JailError::Io(e.into()))
     }
 
@@ -910,7 +902,7 @@ mod linux_impl {
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent, opts)?;
+        let parent = open_directory(dirfd, parent, opts)?;
         unlinkat(parent.as_raw_fd(), &name, AT_REMOVEDIR).map_err(|e| JailError::Io(e.into()))
     }
 
@@ -922,8 +914,8 @@ mod linux_impl {
     ) -> Result<(), JailError> {
         let (from_parent, from_name) = path_component(from)?;
         let (to_parent, to_name) = path_component(to)?;
-        let from_parent = open_parent(dirfd, from_parent, opts)?;
-        let to_parent = open_parent(dirfd, to_parent, opts)?;
+        let from_parent = open_directory(dirfd, from_parent, opts)?;
+        let to_parent = open_directory(dirfd, to_parent, opts)?;
         renameat2(
             from_parent.as_raw_fd(),
             &from_name,
@@ -1497,6 +1489,10 @@ impl FdJail {
     /// components are created with `mkdirat(2)` relative to a pinned parent.
     /// If another process creates a component concurrently, it is resolved as
     /// a directory before the operation continues.
+    ///
+    /// A component that is a dangling symlink fails with
+    /// [`std::io::ErrorKind::NotFound`]: the name exists, so it cannot be
+    /// created, but it does not resolve to a directory.
     ///
     /// Available only on Linux x86_64/aarch64, where every resolution and
     /// mutation is kernel-enforced beneath the jail root.
