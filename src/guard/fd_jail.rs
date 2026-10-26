@@ -1455,6 +1455,11 @@ impl FdJail {
     /// even if another process moves it out of the jail before the syscall;
     /// see the guarded-mutations notes in `SECURITY.md`.
     ///
+    /// The same pinned-parent guarantee applies to
+    /// [`create_dir_all`](Self::create_dir_all),
+    /// [`remove_file`](Self::remove_file), [`remove_dir`](Self::remove_dir),
+    /// and [`rename`](Self::rename).
+    ///
     /// # Errors
     ///
     /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
@@ -1535,6 +1540,12 @@ impl FdJail {
 
     /// Removes a non-directory entry beneath the pinned jail root.
     ///
+    /// The parent path is resolved beneath the jail and pinned before the
+    /// syscall, so renaming or replacing a component of the path afterwards
+    /// cannot redirect it. The pinned parent is the target even if another
+    /// process moves it out of the jail before the syscall; see the
+    /// guarded-mutations notes in `SECURITY.md`.
+    ///
     /// # Errors
     ///
     /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
@@ -1565,6 +1576,12 @@ impl FdJail {
     }
 
     /// Removes an empty directory beneath the pinned jail root.
+    ///
+    /// The parent path is resolved beneath the jail and pinned before the
+    /// syscall, so renaming or replacing a component of the path afterwards
+    /// cannot redirect it. The pinned parent is the target even if another
+    /// process moves it out of the jail before the syscall; see the
+    /// guarded-mutations notes in `SECURITY.md`.
     ///
     /// # Errors
     ///
@@ -1599,7 +1616,10 @@ impl FdJail {
     ///
     /// This has normal Linux rename semantics: an existing destination may be
     /// replaced. Both parent directories are independently pinned beneath the
-    /// jail before `renameat2(2)` executes.
+    /// jail before `renameat2(2)` executes, so renaming or replacing a
+    /// component of either path afterwards cannot redirect it. A pinned parent
+    /// is the target even if another process moves it out of the jail before
+    /// the syscall; see the guarded-mutations notes in `SECURITY.md`.
     ///
     /// # Errors
     ///

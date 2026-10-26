@@ -103,8 +103,10 @@ Footnotes:
    the jail before issuing fd-relative mutation syscalls. `create_dir_all`
    additionally validates existing components with `O_PATH | O_DIRECTORY`.
    A pinned parent that another process moves out of the jail before the
-   syscall is still the target; make the jail root its own mount point if
-   untrusted processes can move directories out of it.
+   syscall is still the target. Where untrusted processes can modify the
+   tree, use a dedicated filesystem or mount for the jail whose contents are
+   not writable through any other path (a bind mount whose source stays
+   writable elsewhere is not enough).
    They are omitted on fallback targets rather than exposing a racy pathname
    implementation.
 7. Opt in with `OpenOptions::require_regular_file(true)`: a directory, FIFO
