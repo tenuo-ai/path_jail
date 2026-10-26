@@ -784,6 +784,120 @@ fn guarded_mutations_stay_beneath_the_jail() {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
+fn create_dir_all_creates_nested_directories_and_is_idempotent() {
+    use path_jail::guard::ResolveOptions;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    jail.create_dir_all("one/two/three").unwrap();
+    jail.create_dir_all("one/two/three").unwrap();
+
+    assert!(dir.path().join("one/two/three").is_dir());
+
+    jail.create_dir_all_with("private/nested", 0o700, ResolveOptions::new())
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path().join("private"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn create_dir_all_accepts_searchable_non_writable_ancestors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let readonly = dir.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    std::fs::create_dir(readonly.join("writable")).unwrap();
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    jail.create_dir_all("readonly").unwrap();
+    jail.create_dir_all("readonly/writable/created").unwrap();
+    assert!(readonly.join("writable/created").is_dir());
+
+    // Let TempDir clean up the nested contents on every platform/filesystem.
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn create_dir_all_rejects_non_directory_components_without_blocking() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("file"), b"data").unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("pipe"))
+        .status()
+        .expect("mkfifo available");
+    assert!(status.success());
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.create_dir_all("file/child"),
+        Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory
+    ));
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(jail.create_dir_all("pipe/child"));
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("directory validation blocked on a FIFO");
+    assert!(matches!(
+        result,
+        Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory
+    ));
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn create_dir_all_handles_concurrent_creators() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    let barrier = Arc::new(Barrier::new(8));
+    let mut threads = Vec::new();
+    for _ in 0..8 {
+        let jail = jail.try_clone().unwrap();
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            jail.create_dir_all("shared/nested/leaf")
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap().unwrap();
+    }
+    assert!(dir.path().join("shared/nested/leaf").is_dir());
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn guarded_mutations_reject_symlink_parent_escape() {
     let jail_dir = tempdir().unwrap();
     let outside = tempdir().unwrap();
@@ -795,6 +909,12 @@ fn guarded_mutations_reject_symlink_parent_escape() {
         Err(JailError::Escape { .. })
     ));
     assert!(!outside.path().join("created").exists());
+
+    assert!(matches!(
+        jail.create_dir_all("escape/nested/created"),
+        Err(JailError::Escape { .. })
+    ));
+    assert!(!outside.path().join("nested").exists());
 }
 
 #[test]
@@ -860,10 +980,16 @@ fn guarded_mutations_honor_no_symlinks() {
     // Default resolution follows an in-jail symlink parent.
     jail.create_dir("alias/a").unwrap();
     assert!(dir.path().join("real/a").is_dir());
+    jail.create_dir_all("alias/nested/a").unwrap();
+    assert!(dir.path().join("real/nested/a").is_dir());
 
     let strict = ResolveOptions::new().no_symlinks(true);
     assert!(matches!(
         jail.create_dir_with("alias/b", strict),
+        Err(JailError::SymlinkRejected { .. })
+    ));
+    assert!(matches!(
+        jail.create_dir_all_with("alias/nested/b", 0o777, strict),
         Err(JailError::SymlinkRejected { .. })
     ));
     assert!(matches!(

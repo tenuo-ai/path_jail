@@ -98,10 +98,12 @@ Footnotes:
    replayable. Do not use them as authorization tokens. Bind freshness and
    request context in the surrounding protocol until the versioned attestation
    format is available.
-6. `create_dir`, `remove_file`, `remove_dir`, and `rename` are available only
-   on Linux x86_64/aarch64. They pin parent directories beneath the jail before
-   issuing fd-relative mutation syscalls. They are omitted on fallback targets
-   rather than exposing a racy pathname implementation.
+6. `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, and `rename` are
+   available only on Linux x86_64/aarch64. They pin parent directories beneath
+   the jail before issuing fd-relative mutation syscalls. `create_dir_all`
+   additionally validates existing components with `O_PATH | O_DIRECTORY`.
+   They are omitted on fallback targets rather than exposing a racy pathname
+   implementation.
 7. Opt in with `OpenOptions::require_regular_file(true)`: a directory, FIFO
    or device node that the OS lets us open fails with
    `JailError::FileTypeRejected`, and the open is non-blocking so a FIFO

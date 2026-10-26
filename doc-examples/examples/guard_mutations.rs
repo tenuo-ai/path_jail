@@ -4,6 +4,7 @@
 ))]
 fn run(jail: &path_jail::guard::FdJail) -> Result<(), path_jail::JailError> {
     // ANCHOR: readme
+    jail.create_dir_all("output/nested")?;
     jail.create_dir("work")?;
     jail.rename("incoming/report.pdf", "work/report.pdf")?;
     jail.remove_file("work/report.pdf")?;
