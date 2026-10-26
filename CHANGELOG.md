@@ -16,12 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while files, FIFOs, and escaping symlinks are rejected. The `_with` variant
   accepts an explicit Unix creation mode and `ResolveOptions`.
 
-### Changed
-
-- `FdJail::create_dir` checks that the created directory is still found at the
-  requested path beneath the jail root; if not, it removes the directory and
-  returns `JailError::Escape`.
-
 ### Documentation
 
 - README: a "Choosing an API" table that links each layer (`Jail`,

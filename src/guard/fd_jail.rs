@@ -850,68 +850,9 @@ mod linux_impl {
         mode: u32,
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
-        create_dir_inner(dirfd, path, mode, opts, &mut |_| {})
-    }
-
-    /// `create_dir` with a hook that runs between resolving the parent and
-    /// `mkdirat`, so tests can interleave concurrent changes deterministically.
-    fn create_dir_inner(
-        dirfd: &OwnedFd,
-        path: &Path,
-        mode: u32,
-        opts: &ResolveOptions,
-        before_create: &mut dyn FnMut(&Path),
-    ) -> Result<(), JailError> {
-        let (parent_path, name) = path_component(path)?;
-        let parent = open_directory(dirfd, parent_path, opts)?;
-        before_create(path);
-        mkdirat(parent.as_raw_fd(), &name, mode & 0o7777).map_err(|e| JailError::Io(e.into()))?;
-
-        // The parent was beneath the jail when it was resolved, but it may
-        // have been moved since. Only report success if the requested path,
-        // resolved again from the root, is the directory just created;
-        // otherwise remove it (it is still empty) and fail.
-        if created_at(dirfd, &parent, &name, path, opts) {
-            return Ok(());
-        }
-        let _ = unlinkat(parent.as_raw_fd(), &name, AT_REMOVEDIR);
-        Err(JailError::Escape {
-            requested: path.to_path_buf(),
-        })
-    }
-
-    /// Whether `path` resolves from the jail root to the entry `name` in
-    /// `parent`.
-    fn created_at(
-        dirfd: &OwnedFd,
-        parent: &OwnedFd,
-        name: &CString,
-        path: &Path,
-        opts: &ResolveOptions,
-    ) -> bool {
-        use std::os::unix::ffi::OsStrExt;
-
-        let entry = Path::new(std::ffi::OsStr::from_bytes(name.as_bytes()));
-        let no_follow = ResolveOptions {
-            no_symlinks: true,
-            ..*opts
-        };
-        match (
-            open_directory(parent, entry, &no_follow),
-            open_directory(dirfd, path, opts),
-        ) {
-            (Ok(created), Ok(resolved)) => match (inode(created), inode(resolved)) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
-    fn inode(fd: OwnedFd) -> Option<(u64, u64)> {
-        use std::os::unix::fs::MetadataExt;
-        let meta = File::from(fd).metadata().ok()?;
-        Some((meta.dev(), meta.ino()))
+        let (parent, name) = path_component(path)?;
+        let parent = open_directory(dirfd, parent, opts)?;
+        mkdirat(parent.as_raw_fd(), &name, mode & 0o7777).map_err(|e| JailError::Io(e.into()))
     }
 
     pub(crate) fn create_dir_all(
@@ -919,16 +860,6 @@ mod linux_impl {
         path: &Path,
         mode: u32,
         opts: &ResolveOptions,
-    ) -> Result<(), JailError> {
-        create_dir_all_inner(dirfd, path, mode, opts, &mut |_| {})
-    }
-
-    fn create_dir_all_inner(
-        dirfd: &OwnedFd,
-        path: &Path,
-        mode: u32,
-        opts: &ResolveOptions,
-        before_create: &mut dyn FnMut(&Path),
     ) -> Result<(), JailError> {
         let mut prefix = PathBuf::new();
         for component in path.components() {
@@ -940,7 +871,7 @@ mod linux_impl {
                 Err(e) => return Err(e),
             }
 
-            match create_dir_inner(dirfd, &prefix, mode, opts, before_create) {
+            match create_dir(dirfd, &prefix, mode, opts) {
                 Ok(()) => {}
                 Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Another process won the create race. Resolve the entry
@@ -993,66 +924,6 @@ mod linux_impl {
             0,
         )
         .map_err(|e| JailError::Io(e.into()))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn setup() -> (tempfile::TempDir, OwnedFd) {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::create_dir(dir.path().join("jail")).unwrap();
-            std::fs::create_dir(dir.path().join("jail/parent")).unwrap();
-            std::fs::create_dir(dir.path().join("outside")).unwrap();
-            let root = OwnedFd::from(File::open(dir.path().join("jail")).unwrap());
-            (dir, root)
-        }
-
-        #[test]
-        fn create_dir_all_fails_if_parent_moves_out_before_create() {
-            let (dir, root) = setup();
-            let moved = dir.path().join("outside/parent");
-            let mut move_parent_out = |_: &Path| {
-                if !moved.exists() {
-                    std::fs::rename(dir.path().join("jail/parent"), &moved).unwrap();
-                }
-            };
-
-            let result = create_dir_all_inner(
-                &root,
-                Path::new("parent/child"),
-                0o777,
-                &ResolveOptions::default(),
-                &mut move_parent_out,
-            );
-
-            assert!(
-                matches!(result, Err(JailError::Escape { .. })),
-                "{result:?}"
-            );
-            assert!(moved.is_dir());
-            assert!(!moved.join("child").exists());
-        }
-
-        #[test]
-        fn create_dir_succeeds_if_parent_moves_within_jail_and_back() {
-            let (dir, root) = setup();
-            let jail = dir.path().join("jail");
-            let mut swap = |_: &Path| {
-                std::fs::rename(jail.join("parent"), jail.join("tmp")).unwrap();
-                std::fs::rename(jail.join("tmp"), jail.join("parent")).unwrap();
-            };
-
-            create_dir_inner(
-                &root,
-                Path::new("parent/child"),
-                0o777,
-                &ResolveOptions::default(),
-                &mut swap,
-            )
-            .unwrap();
-            assert!(jail.join("parent/child").is_dir());
-        }
     }
 }
 
@@ -1579,18 +1450,14 @@ impl FdJail {
     ///
     /// Available on Linux x86_64/aarch64. The parent path is resolved with
     /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and pinned before
-    /// `mkdirat(2)` executes. Afterwards the path is resolved again from the
-    /// root; if it no longer leads to the new directory (for example because
-    /// the parent was moved concurrently), the directory is removed and the
-    /// call fails with [`JailError::Escape`].
+    /// `mkdirat(2)` executes, so concurrent parent renames cannot redirect it.
     ///
     /// # Errors
     ///
     /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
     ///   component that is empty, `.`, `..`, or ends in `/`.
     /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if the parent path
-    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant),
-    ///   or if the created directory is not found at `path` beneath the jail.
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant).
     /// - [`JailError::Io`] for OS errors, for example when the name already exists.
     #[cfg(all(
         target_os = "linux",
@@ -1635,8 +1502,7 @@ impl FdJail {
     /// - [`JailError::InvalidPath`] for an absolute path or a null byte.
     /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if resolution
     ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with`
-    ///   variant), or if a created component is not found at its path beneath
-    ///   the jail (see [`create_dir`](Self::create_dir)).
+    ///   variant).
     /// - [`JailError::Io`] for OS errors, including when an existing component
     ///   is not a directory or a missing component cannot be created.
     #[cfg(all(
