@@ -18,9 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `FdJail::create_dir` checks that the created directory is still found at the
-  requested path beneath the jail root; if not, it removes the directory and
-  returns `JailError::Escape`.
+- `FdJail::create_dir`, `remove_file`, `remove_dir` and `rename` resolve their
+  paths again from the jail root after the syscall and return
+  `JailError::Escape` if a parent is no longer found there. `create_dir`
+  removes the directory it created and `rename` moves the entry back.
 
 ### Documentation
 

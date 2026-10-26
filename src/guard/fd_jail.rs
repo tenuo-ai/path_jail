@@ -664,8 +664,8 @@ mod linux_impl {
     use crate::openat2::{
         clear_nonblock, mkdirat, openat2, renameat2, unlinkat, Errno, OpenHow, AT_REMOVEDIR,
         O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY,
-        O_RDWR, O_TRUNC, O_WRONLY, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
-        RESOLVE_NO_XDEV,
+        O_RDWR, O_TRUNC, O_WRONLY, RENAME_NOREPLACE, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS,
+        RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
     };
     use std::ffi::CString;
     use std::os::unix::io::{AsRawFd, OwnedFd};
@@ -896,15 +896,9 @@ mod linux_impl {
             no_symlinks: true,
             ..*opts
         };
-        match (
-            open_directory(parent, entry, &no_follow),
-            open_directory(dirfd, path, opts),
-        ) {
-            (Ok(created), Ok(resolved)) => match (inode(created), inode(resolved)) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            },
-            _ => false,
+        match open_directory(parent, entry, &no_follow) {
+            Ok(created) => still_at(dirfd, &created, path, opts),
+            Err(_) => false,
         }
     }
 
@@ -955,14 +949,24 @@ mod linux_impl {
         Ok(())
     }
 
+    /// Whether `path` still resolves from the jail root to the `pinned`
+    /// directory.
+    fn still_at(dirfd: &OwnedFd, pinned: &OwnedFd, path: &Path, opts: &ResolveOptions) -> bool {
+        let Ok(resolved) = open_directory(dirfd, path, opts) else {
+            return false;
+        };
+        let Ok(pinned) = pinned.try_clone() else {
+            return false;
+        };
+        matches!((inode(pinned), inode(resolved)), (Some(a), Some(b)) if a == b)
+    }
+
     pub(crate) fn remove_file(
         dirfd: &OwnedFd,
         path: &Path,
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
-        let (parent, name) = path_component(path)?;
-        let parent = open_directory(dirfd, parent, opts)?;
-        unlinkat(parent.as_raw_fd(), &name, 0).map_err(|e| JailError::Io(e.into()))
+        remove_inner(dirfd, path, 0, opts, &mut || {})
     }
 
     pub(crate) fn remove_dir(
@@ -970,9 +974,32 @@ mod linux_impl {
         path: &Path,
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
-        let (parent, name) = path_component(path)?;
-        let parent = open_directory(dirfd, parent, opts)?;
-        unlinkat(parent.as_raw_fd(), &name, AT_REMOVEDIR).map_err(|e| JailError::Io(e.into()))
+        remove_inner(dirfd, path, AT_REMOVEDIR, opts, &mut || {})
+    }
+
+    /// Shared body of `remove_file` / `remove_dir`, with a hook between
+    /// resolving the parent and `unlinkat` for tests.
+    fn remove_inner(
+        dirfd: &OwnedFd,
+        path: &Path,
+        flags: i32,
+        opts: &ResolveOptions,
+        before_remove: &mut dyn FnMut(),
+    ) -> Result<(), JailError> {
+        let (parent_path, name) = path_component(path)?;
+        let parent = open_directory(dirfd, parent_path, opts)?;
+        before_remove();
+        unlinkat(parent.as_raw_fd(), &name, flags).map_err(|e| JailError::Io(e.into()))?;
+
+        // A removal cannot be undone, but the caller must not be told it
+        // happened beneath the jail if the parent had been moved elsewhere.
+        if still_at(dirfd, &parent, parent_path, opts) {
+            Ok(())
+        } else {
+            Err(JailError::Escape {
+                requested: path.to_path_buf(),
+            })
+        }
     }
 
     pub(crate) fn rename(
@@ -981,10 +1008,23 @@ mod linux_impl {
         to: &Path,
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
-        let (from_parent, from_name) = path_component(from)?;
-        let (to_parent, to_name) = path_component(to)?;
-        let from_parent = open_directory(dirfd, from_parent, opts)?;
-        let to_parent = open_directory(dirfd, to_parent, opts)?;
+        rename_inner(dirfd, from, to, opts, &mut || {})
+    }
+
+    /// `rename` with a hook between resolving the parents and `renameat2`
+    /// for tests.
+    fn rename_inner(
+        dirfd: &OwnedFd,
+        from: &Path,
+        to: &Path,
+        opts: &ResolveOptions,
+        before_rename: &mut dyn FnMut(),
+    ) -> Result<(), JailError> {
+        let (from_parent_path, from_name) = path_component(from)?;
+        let (to_parent_path, to_name) = path_component(to)?;
+        let from_parent = open_directory(dirfd, from_parent_path, opts)?;
+        let to_parent = open_directory(dirfd, to_parent_path, opts)?;
+        before_rename();
         renameat2(
             from_parent.as_raw_fd(),
             &from_name,
@@ -992,7 +1032,25 @@ mod linux_impl {
             &to_name,
             0,
         )
-        .map_err(|e| JailError::Io(e.into()))
+        .map_err(|e| JailError::Io(e.into()))?;
+
+        // If either parent was moved out from under its path, put the entry
+        // back (without overwriting anything) and fail.
+        if still_at(dirfd, &from_parent, from_parent_path, opts)
+            && still_at(dirfd, &to_parent, to_parent_path, opts)
+        {
+            return Ok(());
+        }
+        let _ = renameat2(
+            to_parent.as_raw_fd(),
+            &to_name,
+            from_parent.as_raw_fd(),
+            &from_name,
+            RENAME_NOREPLACE,
+        );
+        Err(JailError::Escape {
+            requested: to.to_path_buf(),
+        })
     }
 
     #[cfg(test)]
@@ -1052,6 +1110,83 @@ mod linux_impl {
             )
             .unwrap();
             assert!(jail.join("parent/child").is_dir());
+        }
+
+        #[test]
+        fn remove_fails_if_parent_moves_out_before_unlink() {
+            for (entry, flags) in [("file", 0), ("dir", AT_REMOVEDIR)] {
+                let (dir, root) = setup();
+                let parent = dir.path().join("jail/parent");
+                if flags == 0 {
+                    std::fs::write(parent.join(entry), b"x").unwrap();
+                } else {
+                    std::fs::create_dir(parent.join(entry)).unwrap();
+                }
+                let mut move_parent_out = || {
+                    std::fs::rename(&parent, dir.path().join("outside/parent")).unwrap();
+                };
+
+                let result = remove_inner(
+                    &root,
+                    &Path::new("parent").join(entry),
+                    flags,
+                    &ResolveOptions::default(),
+                    &mut move_parent_out,
+                );
+                assert!(
+                    matches!(result, Err(JailError::Escape { .. })),
+                    "{result:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn rename_is_undone_if_destination_parent_moves_out() {
+            let (dir, root) = setup();
+            let jail = dir.path().join("jail");
+            std::fs::write(jail.join("parent/file"), b"x").unwrap();
+            std::fs::create_dir(jail.join("dest")).unwrap();
+            let moved = dir.path().join("outside/dest");
+            let mut move_dest_out = || std::fs::rename(jail.join("dest"), &moved).unwrap();
+
+            let result = rename_inner(
+                &root,
+                Path::new("parent/file"),
+                Path::new("dest/file"),
+                &ResolveOptions::default(),
+                &mut move_dest_out,
+            );
+
+            assert!(
+                matches!(result, Err(JailError::Escape { .. })),
+                "{result:?}"
+            );
+            assert!(jail.join("parent/file").is_file());
+            assert!(!moved.join("file").exists());
+        }
+
+        #[test]
+        fn rename_is_undone_if_source_parent_moves_out() {
+            let (dir, root) = setup();
+            let jail = dir.path().join("jail");
+            std::fs::write(jail.join("parent/file"), b"x").unwrap();
+            let moved = dir.path().join("outside/parent");
+            let mut move_source_out = || std::fs::rename(jail.join("parent"), &moved).unwrap();
+
+            let result = rename_inner(
+                &root,
+                Path::new("parent/file"),
+                Path::new("file"),
+                &ResolveOptions::default(),
+                &mut move_source_out,
+            );
+
+            assert!(
+                matches!(result, Err(JailError::Escape { .. })),
+                "{result:?}"
+            );
+            assert!(moved.join("file").is_file());
+            assert!(!jail.join("file").exists());
         }
     }
 }
@@ -1665,12 +1800,18 @@ impl FdJail {
 
     /// Removes a non-directory entry beneath the pinned jail root.
     ///
+    /// After `unlinkat(2)`, the parent path is resolved again from the root.
+    /// If it no longer leads to the directory the entry was removed from
+    /// (for example because the parent was moved concurrently), the call
+    /// fails with [`JailError::Escape`]; the removal itself cannot be undone.
+    ///
     /// # Errors
     ///
     /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
     ///   component that is empty, `.`, `..`, or ends in `/`.
     /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if the parent path
-    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant).
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant),
+    ///   or no longer leads to the parent after the removal.
     /// - [`JailError::Io`] for OS errors, for example when the entry does not exist or is a directory.
     #[cfg(all(
         target_os = "linux",
@@ -1696,12 +1837,15 @@ impl FdJail {
 
     /// Removes an empty directory beneath the pinned jail root.
     ///
+    /// Checked after the fact like [`remove_file`](Self::remove_file).
+    ///
     /// # Errors
     ///
     /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
     ///   component that is empty, `.`, `..`, or ends in `/`.
     /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if the parent path
-    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant).
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with` variant),
+    ///   or no longer leads to the parent after the removal.
     /// - [`JailError::Io`] for OS errors, for example when the directory does not exist or is not empty.
     #[cfg(all(
         target_os = "linux",
@@ -1729,13 +1873,22 @@ impl FdJail {
     ///
     /// This has normal Linux rename semantics: an existing destination may be
     /// replaced. Both parent directories are independently pinned beneath the
-    /// jail before `renameat2(2)` executes.
+    /// jail before `renameat2(2)` executes. Afterwards both parent paths are
+    /// resolved again from the root; if either no longer leads to its pinned
+    /// directory (for example because it was moved concurrently), the entry is
+    /// moved back without overwriting anything and the call fails with
+    /// [`JailError::Escape`]. A destination replaced by the rename cannot be
+    /// restored.
     ///
     /// # Errors
     ///
-    /// The errors of [`create_dir`](Self::create_dir) for each of the two paths, plus
-    /// [`JailError::Io`] for OS errors (`EXDEV` across mounts, `ENOTEMPTY` when
-    /// replacing a non-empty directory).
+    /// - [`JailError::InvalidPath`] for an absolute path, a null byte, or a final
+    ///   component that is empty, `.`, `..`, or ends in `/`.
+    /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if either parent
+    ///   path leaves the jail (or violates the [`ResolveOptions`] in the `_with`
+    ///   variant), or no longer leads to its parent after the rename.
+    /// - [`JailError::Io`] for OS errors (`EXDEV` across mounts, `ENOTEMPTY` when
+    ///   replacing a non-empty directory).
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
