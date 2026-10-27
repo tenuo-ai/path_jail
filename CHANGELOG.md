@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Linux x86_64/aarch64 `FdJail::create_dir_all` and
+  `create_dir_all_with` recursively create missing directories beneath the
+  pinned jail root. Existing components are checked non-mutating with
+  `O_PATH | O_DIRECTORY`, so searchable non-writable directories are accepted
+  while files, FIFOs, and escaping symlinks are rejected. The `_with` variant
+  accepts an explicit Unix creation mode and `ResolveOptions`.
+
 ### Documentation
 
 - README: a "Choosing an API" table that links each layer (`Jail`,

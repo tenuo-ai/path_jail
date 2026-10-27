@@ -77,7 +77,7 @@ This is the single support matrix for the crate; other documents link here.
 | `Jail` (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `secure-open` | ✅ | ✅ | ✅ | ✅ | feature is a no-op | compile error² |
 | `guard`: `FdJail::open` / `create` | ✅ atomic (`toctou_safe = true`) | `FdJail::new` → `UnsupportedKernel` | fallback (`toctou_safe = false`) | fallback (`toctou_safe = false`) | not available | compile error² |
-| `guard`: `create_dir`, `remove_file`, `remove_dir`, `rename` | ✅ | — | not available³ | not available³ | — | — |
+| `guard`: `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `rename` | ✅ | — | not available³ | not available³ | — | — |
 | `guard`: `require_regular_file`, `reject_hard_links` | ✅ | — | ✅ | ✅ | — | — |
 | `guard`: `no_symlinks`, `no_xdev` | ✅ enforced | — | no-op | no-op | — | — |
 
@@ -728,10 +728,12 @@ out.write_all(b"processed")?;
 to an `O_NOFOLLOW`-based open (same protection as `secure-open`).
 `attestation().toctou_safe` will be `false`.
 
-On Linux x86_64/aarch64, guarded mutations stay fd-relative as well:
+On Linux x86_64/aarch64, guarded mutations stay fd-relative as well. Recursive
+creation accepts existing directories without requiring write access:
 
 <!-- example: doc-examples/examples/guard_mutations.rs#readme -->
 ```rust
+jail.create_dir_all("output/nested")?;
 jail.create_dir("work")?;
 jail.rename("incoming/report.pdf", "work/report.pdf")?;
 jail.remove_file("work/report.pdf")?;
@@ -740,6 +742,8 @@ jail.remove_dir("work")?;
 
 These methods are intentionally unavailable on fallback platforms because a
 pathname-based fallback would reintroduce the race they are designed to avoid.
+`create_dir_all_with` also accepts an explicit Unix creation mode and
+`ResolveOptions` for rejecting symlinks or mount crossings.
 
 **Blocked by `openat2`:**
 - Symlink escapes (`/etc` link inside jail) → `JailError::Escape`

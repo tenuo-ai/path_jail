@@ -618,12 +618,14 @@ fn finish_open(
 // ── ResolveOptions ────────────────────────────────────────────────────────────
 
 /// Path-resolution options for the guard mutation operations
-/// (`FdJail::create_dir_with`, `remove_file_with`, `remove_dir_with` and
-/// `rename_with`; Linux x86_64/aarch64 only).
+/// (`FdJail::create_dir_with`, `create_dir_all_with`, `remove_file_with`,
+/// `remove_dir_with` and `rename_with`; Linux x86_64/aarch64 only).
 ///
-/// These apply to resolving the parent directory of each path. The final
-/// component is never followed: `unlinkat` and `renameat2` act on a symlink
-/// itself, and `mkdirat` fails if the name already exists.
+/// For single-entry mutations these apply to the parent directory; the final
+/// component is never followed because the `*at` syscall acts on the entry
+/// itself. For `FdJail::create_dir_all_with`, they apply while resolving
+/// every existing component, including the final component. By default,
+/// in-jail symlinks to directories are followed; `no_symlinks` rejects them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResolveOptions {
     pub(crate) no_symlinks: bool,
@@ -813,19 +815,19 @@ mod linux_impl {
         Ok((parent, name))
     }
 
-    fn open_parent(
+    fn open_directory(
         dirfd: &OwnedFd,
-        parent: &Path,
+        path: &Path,
         opts: &ResolveOptions,
     ) -> Result<OwnedFd, JailError> {
         use std::os::unix::ffi::OsStrExt;
 
-        let parent = if parent.as_os_str().is_empty() {
+        let target = if path.as_os_str().is_empty() {
             Path::new(".")
         } else {
-            parent
+            path
         };
-        let cpath = CString::new(parent.as_os_str().as_bytes())
+        let cpath = CString::new(target.as_os_str().as_bytes())
             .map_err(|_| JailError::InvalidPath("null bytes not allowed".into()))?;
         let mut resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
         if opts.no_symlinks {
@@ -839,7 +841,7 @@ mod linux_impl {
             mode: 0,
             resolve,
         };
-        openat2(dirfd.as_raw_fd(), &cpath, &how).map_err(|e| map_errno_to_jail_error(e, parent))
+        openat2(dirfd.as_raw_fd(), &cpath, &how).map_err(|e| map_errno_to_jail_error(e, path))
     }
 
     pub(crate) fn create_dir(
@@ -849,8 +851,39 @@ mod linux_impl {
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent, opts)?;
+        let parent = open_directory(dirfd, parent, opts)?;
         mkdirat(parent.as_raw_fd(), &name, mode & 0o7777).map_err(|e| JailError::Io(e.into()))
+    }
+
+    pub(crate) fn create_dir_all(
+        dirfd: &OwnedFd,
+        path: &Path,
+        mode: u32,
+        opts: &ResolveOptions,
+    ) -> Result<(), JailError> {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component.as_os_str());
+
+            match open_directory(dirfd, &prefix, opts) {
+                Ok(_) => continue,
+                Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+
+            match create_dir(dirfd, &prefix, mode, opts) {
+                Ok(()) => {}
+                Err(JailError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Another process won the create race. Resolve the entry
+                    // as a directory before accepting it; O_PATH avoids read
+                    // or write permission requirements and O_DIRECTORY rejects
+                    // regular files, FIFOs, sockets, and device nodes.
+                    open_directory(dirfd, &prefix, opts)?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn remove_file(
@@ -859,7 +892,7 @@ mod linux_impl {
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent, opts)?;
+        let parent = open_directory(dirfd, parent, opts)?;
         unlinkat(parent.as_raw_fd(), &name, 0).map_err(|e| JailError::Io(e.into()))
     }
 
@@ -869,7 +902,7 @@ mod linux_impl {
         opts: &ResolveOptions,
     ) -> Result<(), JailError> {
         let (parent, name) = path_component(path)?;
-        let parent = open_parent(dirfd, parent, opts)?;
+        let parent = open_directory(dirfd, parent, opts)?;
         unlinkat(parent.as_raw_fd(), &name, AT_REMOVEDIR).map_err(|e| JailError::Io(e.into()))
     }
 
@@ -881,8 +914,8 @@ mod linux_impl {
     ) -> Result<(), JailError> {
         let (from_parent, from_name) = path_component(from)?;
         let (to_parent, to_name) = path_component(to)?;
-        let from_parent = open_parent(dirfd, from_parent, opts)?;
-        let to_parent = open_parent(dirfd, to_parent, opts)?;
+        let from_parent = open_directory(dirfd, from_parent, opts)?;
+        let to_parent = open_directory(dirfd, to_parent, opts)?;
         renameat2(
             from_parent.as_raw_fd(),
             &from_name,
@@ -1417,7 +1450,15 @@ impl FdJail {
     ///
     /// Available on Linux x86_64/aarch64. The parent path is resolved with
     /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` and pinned before
-    /// `mkdirat(2)` executes, so concurrent parent renames cannot redirect it.
+    /// `mkdirat(2)` executes, so renaming or replacing a component of the
+    /// path afterwards cannot redirect it. The pinned parent is the target
+    /// even if another process moves it out of the jail before the syscall;
+    /// see the guarded-mutations notes in `SECURITY.md`.
+    ///
+    /// The same pinned-parent guarantee applies to
+    /// [`create_dir_all`](Self::create_dir_all),
+    /// [`remove_file`](Self::remove_file), [`remove_dir`](Self::remove_dir),
+    /// and [`rename`](Self::rename).
     ///
     /// # Errors
     ///
@@ -1448,7 +1489,62 @@ impl FdJail {
         linux_impl::create_dir(&self.dirfd, &path, 0o777, &opts)
     }
 
+    /// Recursively creates a directory and all missing parent components
+    /// beneath the pinned jail root.
+    ///
+    /// Existing directory components are accepted without requiring read or
+    /// write permission: each is resolved with `O_PATH | O_DIRECTORY`. Missing
+    /// components are created with `mkdirat(2)` relative to a pinned parent.
+    /// If another process creates a component concurrently, it is resolved as
+    /// a directory before the operation continues.
+    ///
+    /// A component that is a dangling symlink fails with
+    /// [`std::io::ErrorKind::NotFound`]: the name exists, so it cannot be
+    /// created, but it does not resolve to a directory.
+    ///
+    /// Available only on Linux x86_64/aarch64, where every path resolution is
+    /// kernel-confined beneath the jail root. Each component is created in a
+    /// pinned parent, with the same guarantee as [`create_dir`](Self::create_dir).
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path or a null byte.
+    /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if resolution
+    ///   leaves the jail (or violates the [`ResolveOptions`] in the `_with`
+    ///   variant).
+    /// - [`JailError::Io`] for OS errors, including when an existing component
+    ///   is not a directory or a missing component cannot be created.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), JailError> {
+        self.create_dir_all_with(path, 0o777, ResolveOptions::default())
+    }
+
+    /// [`create_dir_all`](Self::create_dir_all) with an explicit Unix creation
+    /// mode and [`ResolveOptions`]. The process umask is applied to `mode`.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn create_dir_all_with(
+        &self,
+        path: impl AsRef<Path>,
+        mode: u32,
+        opts: ResolveOptions,
+    ) -> Result<(), JailError> {
+        let path = self.validate_relative(path.as_ref())?;
+        linux_impl::create_dir_all(&self.dirfd, &path, mode, &opts)
+    }
+
     /// Removes a non-directory entry beneath the pinned jail root.
+    ///
+    /// The parent path is resolved beneath the jail and pinned before the
+    /// syscall, so renaming or replacing a component of the path afterwards
+    /// cannot redirect it. The pinned parent is the target even if another
+    /// process moves it out of the jail before the syscall; see the
+    /// guarded-mutations notes in `SECURITY.md`.
     ///
     /// # Errors
     ///
@@ -1480,6 +1576,12 @@ impl FdJail {
     }
 
     /// Removes an empty directory beneath the pinned jail root.
+    ///
+    /// The parent path is resolved beneath the jail and pinned before the
+    /// syscall, so renaming or replacing a component of the path afterwards
+    /// cannot redirect it. The pinned parent is the target even if another
+    /// process moves it out of the jail before the syscall; see the
+    /// guarded-mutations notes in `SECURITY.md`.
     ///
     /// # Errors
     ///
@@ -1514,7 +1616,10 @@ impl FdJail {
     ///
     /// This has normal Linux rename semantics: an existing destination may be
     /// replaced. Both parent directories are independently pinned beneath the
-    /// jail before `renameat2(2)` executes.
+    /// jail before `renameat2(2)` executes, so renaming or replacing a
+    /// component of either path afterwards cannot redirect it. A pinned parent
+    /// is the target even if another process moves it out of the jail before
+    /// the syscall; see the guarded-mutations notes in `SECURITY.md`.
     ///
     /// # Errors
     ///

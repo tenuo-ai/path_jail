@@ -283,11 +283,23 @@ privileged processes.
 
 ### 4.10 Guarded mutations
 
-On Linux x86_64 and aarch64, `FdJail` also provides `create_dir`, `remove_file`, `remove_dir`, and
-`rename`. Each one opens the parent directory with `openat2(O_PATH | O_DIRECTORY, RESOLVE_BENEATH)`
-and then issues the matching `*at` syscall on that pinned parent, so a concurrent rename of a
-parent directory cannot redirect the operation. The `_with` variants take `ResolveOptions` to also
-reject symlinks or mount crossings in the parent path.
+On Linux x86_64 and aarch64, `FdJail` also provides `create_dir`, `create_dir_all`, `remove_file`,
+`remove_dir`, and `rename`. Each mutation opens the parent directory with
+`openat2(O_PATH | O_DIRECTORY, RESOLVE_BENEATH)` and then issues the matching `*at` syscall on that
+pinned parent. Path resolution is kernel-confined, and renaming or replacing a path component
+after it has been resolved cannot redirect the operation to a different directory.
+`create_dir_all` checks existing components with `O_PATH | O_DIRECTORY`, requiring neither read nor
+write access and rejecting non-directory entries without opening them for I/O. The `_with` variants
+take `ResolveOptions` to also reject symlinks or mount crossings during resolution.
+
+The pinned parent is identified by its inode, not its location. Linux has no beneath-the-root form
+of `mkdirat`, `unlinkat`, or `renameat2`, so if another process moves that directory out of the jail
+between resolution and the syscall, the operation follows it. A check afterwards cannot close this
+(the directory can be moved back first), so none is attempted. Where untrusted processes can
+modify the tree, give the jail a dedicated filesystem or mount whose contents are not writable
+through any other path. `rename(2)` cannot cross mounts, so directories then cannot leave the jail.
+A bind mount alone is not enough while its source tree stays writable elsewhere, because a
+directory can be moved out through the source path.
 
 - **Not provided on the fallback.** A pathname-based `create_dir` or `rename` would reintroduce
   exactly the race these methods exist to close, so they are not compiled where they cannot be
@@ -410,7 +422,6 @@ Open proposals, each tracked in an issue:
 
 - [Guarded `openat2` on more Linux architectures](https://github.com/tenuo-ai/path_jail/issues/5)
 - [A guarded Windows backend](https://github.com/tenuo-ai/path_jail/issues/6) built on directory handles
-- [Race-safe recursive directory creation](https://github.com/tenuo-ai/path_jail/issues/7) (`create_dir_all`)
 - [A versioned (v2) attestation wire format](https://github.com/tenuo-ai/path_jail/issues/10) with freshness and context
 - [Handle-relative directory access and iteration](https://github.com/tenuo-ai/path_jail/issues/11)
 - [Atomic guarded file replacement](https://github.com/tenuo-ai/path_jail/issues/13)
