@@ -162,18 +162,24 @@ directories out of band or with `std::fs` from trusted code.
 ## Replace a file
 
 To replace a file without ever writing through whatever currently sits at its
-name, write a new file and rename it into place (Linux x86_64/aarch64):
+name, use `replace_file` (Linux x86_64/aarch64). It creates a private temporary
+file in the pinned destination directory, passes it to your writer, and installs
+it with one rename:
 
 <!-- example: doc-examples/examples/migration.rs#replace -->
 ```rust
-// Write a fresh file, then move it into place. Unlike an in-place
-// truncate, nothing that already exists at `name` is ever written to.
-let mut file = jail.create(tmp)?;
-file.write_all(data)?;
-file.sync_all()?;
-drop(file);
-jail.rename(tmp, name)?;
+jail.replace_file_with(
+    name,
+    ReplaceOptions::new().sync_file(true).sync_parent(true),
+    |file| file.write_all(data),
+)?;
 ```
+
+The default mode atomically overwrites an existing destination.
+`ReplaceMode::NoClobber` fails if the destination exists or appears before
+installation. Write, file-sync, and install failures preserve the previous
+destination and report any temporary-file cleanup error. A parent-sync failure
+is reported after installation, so the new file may already be visible.
 
 ## Error mapping
 
@@ -184,6 +190,10 @@ jail.rename(tmp, name)?;
 | (none: a FIFO blocked, a device opened) | `JailError::FileTypeRejected { file_type, .. }` |
 | (none: a hard link was followed) | `JailError::HardLinkRejected { nlink, .. }` |
 | invalid input you checked by hand | `JailError::InvalidPath` (absolute path, null byte, invalid flag combination) |
+
+`replace_file` returns `ReplaceError`, whose variants identify create, write,
+file-sync, install, and parent-sync failures. `ReplaceError::cleanup_error`
+reports a secondary failure while removing the temporary entry.
 
 Treat every variant other than `Io` as a policy rejection (for an HTTP API, a
 4xx), and `Io` as an operational error. `JailError` is `#[non_exhaustive]`, so

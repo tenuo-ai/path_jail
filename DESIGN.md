@@ -284,13 +284,20 @@ privileged processes.
 ### 4.10 Guarded mutations
 
 On Linux x86_64 and aarch64, `FdJail` also provides `create_dir`, `create_dir_all`, `remove_file`,
-`remove_dir`, and `rename`. Each mutation opens the parent directory with
+`remove_dir`, `rename`, and `replace_file`. Each mutation opens the parent directory with
 `openat2(O_PATH | O_DIRECTORY, RESOLVE_BENEATH)` and then issues the matching `*at` syscall on that
 pinned parent. Path resolution is kernel-confined, and renaming or replacing a path component
 after it has been resolved cannot redirect the operation to a different directory.
 `create_dir_all` checks existing components with `O_PATH | O_DIRECTORY`, requiring neither read nor
 write access and rejecting non-directory entries without opening them for I/O. The `_with` variants
 take `ResolveOptions` to also reject symlinks or mount crossings during resolution.
+
+`replace_file` creates a private `O_CREAT | O_EXCL` file in the pinned destination directory,
+passes it to a caller-provided writer, and installs it with `renameat2`. The no-clobber mode uses
+`RENAME_NOREPLACE`, so it has no check-then-rename race. Failed writes, file syncs, and installs
+attempt to unlink the temporary entry through the same pinned parent and preserve any cleanup
+error. Optional parent-directory syncing happens after installation and therefore cannot be
+rolled back if that sync fails.
 
 The pinned parent is identified by its inode, not its location. Linux has no beneath-the-root form
 of `mkdirat`, `unlinkat`, or `renameat2`, so if another process moves that directory out of the jail
@@ -425,7 +432,6 @@ Open proposals, each tracked in an issue:
 - [A guarded Windows backend](https://github.com/tenuo-ai/path_jail/issues/6) built on directory handles
 - [A versioned (v2) attestation wire format](https://github.com/tenuo-ai/path_jail/issues/10) with freshness and context
 - [Handle-relative directory access and iteration](https://github.com/tenuo-ai/path_jail/issues/11)
-- [Atomic guarded file replacement](https://github.com/tenuo-ai/path_jail/issues/13)
 
 Decided against:
 

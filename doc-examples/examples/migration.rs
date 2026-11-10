@@ -1,6 +1,11 @@
 #![allow(dead_code)]
 
 use path_jail::guard::{FdJail, OpenOptions};
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use path_jail::guard::{ReplaceError, ReplaceOptions};
 use path_jail::JailError;
 use std::io::{Read, Write};
 
@@ -78,15 +83,13 @@ fn mutate(jail: &FdJail) -> Result<(), JailError> {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn replace(jail: &FdJail, name: &str, tmp: &str, data: &[u8]) -> Result<(), JailError> {
+fn replace(jail: &FdJail, name: &str, data: &[u8]) -> Result<(), ReplaceError> {
     // ANCHOR: replace
-    // Write a fresh file, then move it into place. Unlike an in-place
-    // truncate, nothing that already exists at `name` is ever written to.
-    let mut file = jail.create(tmp)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    drop(file);
-    jail.rename(tmp, name)?;
+    jail.replace_file_with(
+        name,
+        ReplaceOptions::new().sync_file(true).sync_parent(true),
+        |file| file.write_all(data),
+    )?;
     // ANCHOR_END: replace
     Ok(())
 }
