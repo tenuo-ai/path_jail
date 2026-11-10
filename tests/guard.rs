@@ -621,12 +621,162 @@ fn no_xdev_succeeds_when_no_mount_crossing() {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_directory_iterates_and_opens_entries_relative_to_handle() {
+    use path_jail::guard::FileKind;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempdir().unwrap();
+    let listing = dir.path().join("listing");
+    std::fs::create_dir(&listing).unwrap();
+    std::fs::write(listing.join("alpha.txt"), b"alpha").unwrap();
+    let non_utf8 = OsString::from_vec(vec![b'b', 0xff]);
+    std::fs::write(listing.join(&non_utf8), b"bytes").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    let guarded = jail.open_dir("listing").unwrap();
+
+    let entries = guarded
+        .read_dir()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| entry.inode() != 0));
+    assert!(entries.iter().any(|entry| entry.file_name() == "alpha.txt"));
+    assert!(entries.iter().any(|entry| entry.file_name() == non_utf8));
+    assert!(entries
+        .iter()
+        .filter_map(|entry| entry.file_kind_hint())
+        .all(|kind| kind == FileKind::Regular));
+
+    let alpha = entries
+        .iter()
+        .find(|entry| entry.file_name() == "alpha.txt")
+        .unwrap();
+    let mut file = guarded
+        .open(
+            alpha.file_name(),
+            OpenOptions::new().read(true).require_regular_file(true),
+        )
+        .unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "alpha");
+    assert_eq!(
+        file.attestation().opened_path,
+        std::path::Path::new("listing/alpha.txt")
+    );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_directory_iterators_have_independent_offsets() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("listing")).unwrap();
+    std::fs::write(dir.path().join("listing/one"), b"1").unwrap();
+    std::fs::write(dir.path().join("listing/two"), b"2").unwrap();
+    let guarded = FdJail::new(dir.path())
+        .unwrap()
+        .open_dir("listing")
+        .unwrap();
+
+    let mut first = guarded.read_dir().unwrap();
+    let mut second = guarded.read_dir().unwrap();
+    assert!(first.next().unwrap().is_ok());
+    assert_eq!(first.count(), 1);
+    assert_eq!(
+        second
+            .by_ref()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_directory_is_not_redirected_by_rename_and_symlink_replacement() {
+    let workspace = tempdir().unwrap();
+    let jail_root = workspace.path().join("jail");
+    let original = jail_root.join("selected");
+    let moved = workspace.path().join("moved");
+    let decoy = workspace.path().join("decoy");
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::create_dir(&decoy).unwrap();
+    std::fs::write(original.join("value.txt"), b"original").unwrap();
+    std::fs::write(decoy.join("value.txt"), b"decoy").unwrap();
+    let guarded = FdJail::new(&jail_root)
+        .unwrap()
+        .open_dir("selected")
+        .unwrap();
+
+    std::fs::rename(&original, &moved).unwrap();
+    std::os::unix::fs::symlink(&decoy, &original).unwrap();
+
+    let mut file = guarded
+        .open("value.txt", OpenOptions::new().read(true))
+        .unwrap();
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "original");
+    assert_eq!(
+        guarded
+            .read_dir()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_directory_rejects_entry_replaced_with_escaping_symlink() {
+    let workspace = tempdir().unwrap();
+    let jail_root = workspace.path().join("jail");
+    let listing = jail_root.join("listing");
+    let outside = workspace.path().join("outside.txt");
+    std::fs::create_dir_all(&listing).unwrap();
+    std::fs::write(listing.join("entry"), b"inside").unwrap();
+    std::fs::write(&outside, b"outside").unwrap();
+    let guarded = FdJail::new(&jail_root)
+        .unwrap()
+        .open_dir("listing")
+        .unwrap();
+    let entry = guarded.read_dir().unwrap().next().unwrap().unwrap();
+
+    std::fs::remove_file(listing.join("entry")).unwrap();
+    std::os::unix::fs::symlink(&outside, listing.join("entry")).unwrap();
+
+    assert!(matches!(
+        guarded.open(entry.file_name(), OpenOptions::new().read(true)),
+        Err(JailError::Escape { .. })
+    ));
+}
+
+#[test]
 #[ignore = "requires root/CAP_SYS_ADMIN; exercised by privileged-tests.yml"]
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn no_xdev_rejects_bind_mount() {
+    use path_jail::guard::ResolveOptions;
     use std::process::Command;
 
     let workspace = tempdir().unwrap();
@@ -645,19 +795,20 @@ fn no_xdev_rejects_bind_mount() {
         .expect("run mount --bind");
     assert!(mounted.success(), "mount --bind failed");
 
-    let result = FdJail::new(&jail_root).and_then(|jail| {
-        jail.open(
-            "mnt/outside.txt",
-            OpenOptions::new().read(true).no_xdev(true),
-        )
-    });
+    let jail = FdJail::new(&jail_root).unwrap();
+    let open_result = jail.open(
+        "mnt/outside.txt",
+        OpenOptions::new().read(true).no_xdev(true),
+    );
+    let directory_result = jail.open_dir_with("mnt", ResolveOptions::new().no_xdev(true));
 
     let unmounted = Command::new("umount")
         .arg(&mountpoint)
         .status()
         .expect("run umount");
     assert!(unmounted.success(), "umount failed");
-    assert!(matches!(result, Err(JailError::Escape { .. })));
+    assert!(matches!(open_result, Err(JailError::Escape { .. })));
+    assert!(matches!(directory_result, Err(JailError::Escape { .. })));
 }
 
 // ── Clone / Send / Sync for FdJail ───────────────────────────────────────────

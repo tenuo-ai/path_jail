@@ -14,5 +14,7 @@ pub use fd_jail::{
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-pub use fd_jail::{ReplaceError, ReplaceMode, ReplaceOptions};
+pub use fd_jail::{
+    GuardedDir, GuardedDirEntry, GuardedReadDir, ReplaceError, ReplaceMode, ReplaceOptions,
+};
 pub use signing::{Signer, Verifier, VerifyError};

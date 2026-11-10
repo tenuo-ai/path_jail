@@ -325,7 +325,25 @@ directory can be moved out through the source path.
 - **Retry `EAGAIN`.** With `RESOLVE_BENEATH`, the kernel returns `EAGAIN` when a rename races `..`
   resolution. The wrapper retries a bounded number of times rather than surface a transient error.
 
-### 4.11 `check_path` is for display, not for opening
+### 4.11 Handle-relative directory access
+
+On Linux x86_64 and aarch64, `FdJail::open_dir` resolves a directory with
+`openat2(O_PATH | O_DIRECTORY, RESOLVE_BENEATH)` and returns a `GuardedDir` that owns the pinned
+descriptor. `GuardedDir::read_dir` reopens `.` through that descriptor and reads `getdents64`
+records directly. Each iterator gets a distinct open file description, so directory offsets are
+independent. Non-UTF-8 names remain raw `OsString` values.
+
+Iteration is not authorization: names, inode numbers, and file-type hints can become stale as soon
+as the kernel returns them. `GuardedDir::open` resolves the current name beneath the pinned
+directory and applies `OpenOptions` policies to the handle actually opened. The resulting
+attestation records the original root-relative directory path plus the requested relative path.
+
+Like guarded mutation parents, a `GuardedDir` identifies an inode rather than a current location.
+Replacing its original path cannot redirect it, but moving that inode outside the jail does not
+revoke an existing handle. The API is omitted on fallback platforms rather than reconstructing an
+ambient pathname from an entry name.
+
+### 4.12 `check_path` is for display, not for opening
 
 `FdJail::check_path` validates a path without returning a descriptor, for log lines, error
 messages, and audit records. On Linux it resolves existing paths with the same `openat2` rules as
@@ -438,7 +456,6 @@ Open proposals, each tracked in an issue:
 - [Guarded `openat2` on more Linux architectures](https://github.com/tenuo-ai/path_jail/issues/5)
 - [A guarded Windows backend](https://github.com/tenuo-ai/path_jail/issues/6) built on directory handles
 - [A versioned (v2) attestation wire format](https://github.com/tenuo-ai/path_jail/issues/10) with freshness and context
-- [Handle-relative directory access and iteration](https://github.com/tenuo-ai/path_jail/issues/11)
 
 Decided against:
 

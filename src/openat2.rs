@@ -73,6 +73,11 @@ const SYS_RENAMEAT2: i64 = 316;
 #[cfg(target_arch = "aarch64")]
 const SYS_RENAMEAT2: i64 = 276;
 
+#[cfg(target_arch = "x86_64")]
+const SYS_GETDENTS64: i64 = 217;
+#[cfg(target_arch = "aarch64")]
+const SYS_GETDENTS64: i64 = 61;
+
 pub(crate) const AT_REMOVEDIR: i32 = 0x200;
 pub(crate) const RENAME_NOREPLACE: u32 = 1;
 
@@ -212,6 +217,24 @@ pub(crate) fn renameat2(
         )
     };
     syscall_unit(ret)
+}
+
+/// Reads Linux `dirent64` records from an open directory descriptor.
+pub(crate) fn getdents64(dirfd: RawFd, buffer: &mut [u8]) -> Result<usize, Errno> {
+    let ret = unsafe {
+        syscall4(
+            SYS_GETDENTS64,
+            dirfd as i64,
+            buffer.as_mut_ptr() as i64,
+            buffer.len() as i64,
+            0,
+        )
+    };
+    if ret < 0 {
+        Err(Errno(-ret as i32))
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 fn syscall_unit(ret: i64) -> Result<(), Errno> {
