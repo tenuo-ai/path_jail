@@ -878,6 +878,9 @@ fn guarded_directory_access_resists_concurrent_entry_replacement() {
         }
         for candidate in directory.read_dir().unwrap() {
             let candidate = candidate.unwrap();
+            if candidate.file_name() != "entry" {
+                continue;
+            }
             let Ok(mut file) = directory.open(
                 candidate.file_name(),
                 OpenOptions::new().read(true).require_regular_file(true),
