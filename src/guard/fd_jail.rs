@@ -2206,6 +2206,65 @@ impl FdJail {
         linux_impl::replace_file(&self.dirfd, &path, options, write)
     }
 
+    /// Reads an entire regular file into a byte vector.
+    ///
+    /// The file is opened through the same guarded backend as [`open`](Self::open)
+    /// and is required to be regular, so a FIFO cannot block the read and a
+    /// directory or device node is rejected.
+    ///
+    /// ```no_run
+    /// use path_jail::guard::FdJail;
+    ///
+    /// let jail = FdJail::new("/srv/uploads")?;
+    /// let bytes = jail.read("report.bin")?;
+    /// # let _ = bytes;
+    /// # Ok::<(), path_jail::JailError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`open`](Self::open), including
+    /// [`JailError::FileTypeRejected`] for a non-regular file, or
+    /// [`JailError::Io`] if reading the opened file fails.
+    pub fn read(&self, path: impl AsRef<Path>) -> Result<Vec<u8>, JailError> {
+        use std::io::Read;
+
+        let mut file = self.open(
+            path,
+            OpenOptions::new().read(true).require_regular_file(true),
+        )?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).map_err(JailError::Io)?;
+        Ok(contents)
+    }
+
+    /// Reads an entire regular file into a UTF-8 string.
+    ///
+    /// ```no_run
+    /// use path_jail::guard::FdJail;
+    ///
+    /// let jail = FdJail::new("/srv/uploads")?;
+    /// let text = jail.read_to_string("report.txt")?;
+    /// # let _ = text;
+    /// # Ok::<(), path_jail::JailError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`read`](Self::read). Invalid UTF-8 is
+    /// returned as [`JailError::Io`] with [`std::io::ErrorKind::InvalidData`].
+    pub fn read_to_string(&self, path: impl AsRef<Path>) -> Result<String, JailError> {
+        use std::io::Read;
+
+        let mut file = self.open(
+            path,
+            OpenOptions::new().read(true).require_regular_file(true),
+        )?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).map_err(JailError::Io)?;
+        Ok(contents)
+    }
+
     /// Atomically creates a directory beneath the pinned jail root.
     ///
     /// Available on Linux x86_64/aarch64. The parent path is resolved with

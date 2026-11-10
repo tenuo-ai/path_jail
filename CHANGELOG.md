@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linux x86_64/aarch64 `FdJail::open_dir` returns a pinned `GuardedDir` with
   handle-relative `read_dir` and `open` operations. Iteration uses `getdents64`
   directly and supports non-UTF-8 names without adding dependencies.
+- `FdJail::read` and `read_to_string` provide guarded whole-file reads. Both
+  require a regular file so FIFOs, directories, and device nodes are rejected.
 
 ## [0.5.1] - 2026-10-26
 

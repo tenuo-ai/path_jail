@@ -726,6 +726,9 @@ let mut out = jail.create("output.bin")?;
 out.write_all(b"processed")?;
 ```
 
+For whole-file reads, `FdJail::read` and `read_to_string` use the same guarded
+open and reject non-regular files before reading.
+
 **On macOS/BSD and Linux architectures without an `openat2` shim:** falls back
 to an `O_NOFOLLOW`-based open (same protection as `secure-open`).
 `attestation().toctou_safe` will be `false`.
