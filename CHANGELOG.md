@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-10
+
 ### Added
 
+- `GuardCapabilities` and `FdJail::capabilities()` report the guarantees and
+  operations provided by the active backend before untrusted paths are handled.
 - Linux x86_64/aarch64 `FdJail::replace_file` and `replace_file_with` atomically
   install closure-written files beneath a pinned destination parent. Options
   cover overwrite/no-clobber behavior and file/parent syncing; staged errors

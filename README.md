@@ -552,7 +552,7 @@ write a new file and `rename` it into place; see
 ## Framework Integration
 
 These examples use the `guard` feature
-(`path_jail = { version = "0.5", features = ["guard"] }`) and compile on any
+(`path_jail = { version = "0.6", features = ["guard"] }`) and compile on any
 Unix. The open is atomic and kernel-enforced on Linux 5.6+ x86_64/aarch64; on
 other Unix targets it uses the `O_NOFOLLOW` fallback, which protects only the
 final component. Guarded opens and writes are blocking calls, so they run off
@@ -652,7 +652,7 @@ Enable the `secure-open` feature for `O_NOFOLLOW`-protected file operations:
 
 ```toml
 [dependencies]
-path_jail = { version = "0.5", features = ["secure-open"] }
+path_jail = { version = "0.6", features = ["secure-open"] }
 ```
 
 <!-- example: doc-examples/examples/secure_open.rs#readme -->
@@ -688,7 +688,7 @@ On Linux 5.6+ x86_64/aarch64, the `guard` feature resolves and opens with a sing
 
 ```toml
 [dependencies]
-path_jail = { version = "0.5", features = ["guard"] }
+path_jail = { version = "0.6", features = ["guard"] }
 ```
 
 <!-- example: doc-examples/examples/guard_open.rs#readme -->
