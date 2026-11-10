@@ -10,4 +10,9 @@ mod signing;
 pub use fd_jail::{
     Attestation, FdJail, FileKind, GuardCapabilities, GuardedFile, OpenOptions, ResolveOptions,
 };
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub use fd_jail::{ReplaceError, ReplaceMode, ReplaceOptions};
 pub use signing::{Signer, Verifier, VerifyError};

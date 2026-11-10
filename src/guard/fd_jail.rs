@@ -47,6 +47,182 @@ pub struct GuardCapabilities {
     pub no_xdev: bool,
 }
 
+/// Destination behavior for an atomic guarded file replacement.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ReplaceMode {
+    /// Replace an existing destination atomically.
+    #[default]
+    Overwrite,
+    /// Fail with [`std::io::ErrorKind::AlreadyExists`] if the destination exists.
+    NoClobber,
+}
+
+/// Options for [`FdJail::replace_file_with`].
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReplaceOptions {
+    mode: ReplaceMode,
+    sync_file: bool,
+    sync_parent: bool,
+    resolve: ResolveOptions,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl ReplaceOptions {
+    /// Creates options with overwrite behavior and no durability syncs.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Selects overwrite or no-clobber installation behavior.
+    pub fn mode(mut self, mode: ReplaceMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Syncs the replacement file before installing it.
+    pub fn sync_file(mut self, enabled: bool) -> Self {
+        self.sync_file = enabled;
+        self
+    }
+
+    /// Syncs the destination parent directory after installation.
+    ///
+    /// If this sync fails, the replacement has already been installed; the
+    /// error reports uncertain directory-entry durability, not a rollback.
+    pub fn sync_parent(mut self, enabled: bool) -> Self {
+        self.sync_parent = enabled;
+        self
+    }
+
+    /// Sets path-resolution policy for the destination parent directory.
+    pub fn resolve_options(mut self, options: ResolveOptions) -> Self {
+        self.resolve = options;
+        self
+    }
+}
+
+/// Failure from an atomic guarded file replacement.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ReplaceError {
+    /// The destination was invalid, its parent could not be resolved, or the
+    /// temporary file could not be created.
+    Create(JailError),
+    /// The caller-provided writer failed.
+    Write {
+        /// The write failure.
+        source: std::io::Error,
+        /// Failure while removing the temporary file, if cleanup also failed.
+        cleanup: Option<std::io::Error>,
+    },
+    /// Syncing the completed temporary file failed.
+    SyncFile {
+        /// The file sync failure.
+        source: std::io::Error,
+        /// Failure while removing the temporary file, if cleanup also failed.
+        cleanup: Option<std::io::Error>,
+    },
+    /// Atomically installing the replacement failed.
+    Install {
+        /// The rename failure.
+        source: std::io::Error,
+        /// Failure while removing the temporary file, if cleanup also failed.
+        cleanup: Option<std::io::Error>,
+    },
+    /// The replacement was installed, but syncing its parent directory failed.
+    SyncParent(std::io::Error),
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl ReplaceError {
+    /// Returns a cleanup failure attached to a write, sync, or install failure.
+    pub fn cleanup_error(&self) -> Option<&std::io::Error> {
+        match self {
+            Self::Write { cleanup, .. }
+            | Self::SyncFile { cleanup, .. }
+            | Self::Install { cleanup, .. } => cleanup.as_ref(),
+            Self::Create(_) | Self::SyncParent(_) => None,
+        }
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl std::fmt::Display for ReplaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Create(error) => write!(f, "could not create replacement: {error}"),
+            Self::Write { source, cleanup } => {
+                write_replace_failure(f, "writing replacement", source, cleanup.as_ref())
+            }
+            Self::SyncFile { source, cleanup } => {
+                write_replace_failure(f, "syncing replacement", source, cleanup.as_ref())
+            }
+            Self::Install { source, cleanup } => {
+                write_replace_failure(f, "installing replacement", source, cleanup.as_ref())
+            }
+            Self::SyncParent(error) => write!(
+                f,
+                "replacement installed but parent directory sync failed: {error}"
+            ),
+        }
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn write_replace_failure(
+    f: &mut std::fmt::Formatter<'_>,
+    operation: &str,
+    source: &std::io::Error,
+    cleanup: Option<&std::io::Error>,
+) -> std::fmt::Result {
+    write!(f, "{operation} failed: {source}")?;
+    if let Some(cleanup) = cleanup {
+        write!(f, "; temporary-file cleanup also failed: {cleanup}")?;
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl std::error::Error for ReplaceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Create(error) => Some(error),
+            Self::Write { source, .. }
+            | Self::SyncFile { source, .. }
+            | Self::Install { source, .. }
+            | Self::SyncParent(source) => Some(source),
+        }
+    }
+}
+
 /// A file opened through [`FdJail::open`] or [`FdJail::create`] (guard API).
 ///
 /// Holds both the open file descriptor and attestation data recorded at open
@@ -636,7 +812,8 @@ fn finish_open(
 
 /// Path-resolution options for the guard mutation operations
 /// (`FdJail::create_dir_with`, `create_dir_all_with`, `remove_file_with`,
-/// `remove_dir_with` and `rename_with`; Linux x86_64/aarch64 only).
+/// `remove_dir_with`, `rename_with`, and `replace_file_with`; Linux
+/// x86_64/aarch64 only).
 ///
 /// For single-entry mutations these apply to the parent directory; the final
 /// component is never followed because the `*at` syscall acts on the entry
@@ -681,11 +858,14 @@ mod linux_impl {
     use crate::openat2::{
         clear_nonblock, mkdirat, openat2, renameat2, unlinkat, Errno, OpenHow, AT_REMOVEDIR,
         O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY,
-        O_RDWR, O_TRUNC, O_WRONLY, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
-        RESOLVE_NO_XDEV,
+        O_RDWR, O_TRUNC, O_WRONLY, RENAME_NOREPLACE, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS,
+        RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV,
     };
     use std::ffi::CString;
     use std::os::unix::io::{AsRawFd, OwnedFd};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static REPLACEMENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Implementation of [`FdJail::open`] on Linux using `openat2`.
     pub(crate) fn jail_open(
@@ -837,6 +1017,15 @@ mod linux_impl {
         path: &Path,
         opts: &ResolveOptions,
     ) -> Result<OwnedFd, JailError> {
+        open_directory_with_flags(dirfd, path, opts, O_PATH)
+    }
+
+    fn open_directory_with_flags(
+        dirfd: &OwnedFd,
+        path: &Path,
+        opts: &ResolveOptions,
+        flags: u64,
+    ) -> Result<OwnedFd, JailError> {
         use std::os::unix::ffi::OsStrExt;
 
         let target = if path.as_os_str().is_empty() {
@@ -854,11 +1043,141 @@ mod linux_impl {
             resolve |= RESOLVE_NO_XDEV;
         }
         let how = OpenHow {
-            flags: O_PATH | O_DIRECTORY | O_CLOEXEC,
+            flags: flags | O_DIRECTORY | O_CLOEXEC,
             mode: 0,
             resolve,
         };
         openat2(dirfd.as_raw_fd(), &cpath, &how).map_err(|e| map_errno_to_jail_error(e, path))
+    }
+
+    struct TemporaryEntry<'a> {
+        parent: &'a OwnedFd,
+        name: CString,
+        armed: bool,
+    }
+
+    impl TemporaryEntry<'_> {
+        fn cleanup(&mut self) -> Option<std::io::Error> {
+            if !self.armed {
+                return None;
+            }
+            match unlinkat(self.parent.as_raw_fd(), &self.name, 0) {
+                Ok(()) | Err(Errno::ENOENT) => {
+                    self.armed = false;
+                    None
+                }
+                Err(error) => Some(error.into()),
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for TemporaryEntry<'_> {
+        fn drop(&mut self) {
+            let _ = self.cleanup();
+        }
+    }
+
+    fn create_temporary_file(
+        parent: &OwnedFd,
+        destination: &CString,
+    ) -> Result<(File, CString), JailError> {
+        let how = OpenHow {
+            flags: O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
+            mode: 0o600,
+            resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+        };
+
+        for _ in 0..128 {
+            let counter = REPLACEMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = CString::new(format!(
+                ".path-jail-replace-{}-{counter:016x}.tmp",
+                std::process::id()
+            ))
+            .expect("generated replacement name contains no null bytes");
+            if name == *destination {
+                continue;
+            }
+            match openat2(parent.as_raw_fd(), &name, &how) {
+                Ok(fd) => return Ok((File::from(fd), name)),
+                Err(error)
+                    if std::io::Error::from(error).kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(JailError::Io(error.into())),
+            }
+        }
+
+        Err(JailError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique replacement file name",
+        )))
+    }
+
+    pub(crate) fn replace_file<F>(
+        dirfd: &OwnedFd,
+        path: &Path,
+        options: ReplaceOptions,
+        write: F,
+    ) -> Result<(), ReplaceError>
+    where
+        F: FnOnce(&mut File) -> std::io::Result<()>,
+    {
+        let (parent_path, destination) = path_component(path).map_err(ReplaceError::Create)?;
+        let parent_flags = if options.sync_parent {
+            O_RDONLY
+        } else {
+            O_PATH
+        };
+        let parent = open_directory_with_flags(dirfd, parent_path, &options.resolve, parent_flags)
+            .map_err(ReplaceError::Create)?;
+        let (mut file, temporary_name) =
+            create_temporary_file(&parent, &destination).map_err(ReplaceError::Create)?;
+        let mut temporary = TemporaryEntry {
+            parent: &parent,
+            name: temporary_name,
+            armed: true,
+        };
+
+        if let Err(source) = write(&mut file) {
+            drop(file);
+            let cleanup = temporary.cleanup();
+            return Err(ReplaceError::Write { source, cleanup });
+        }
+        if options.sync_file {
+            if let Err(source) = file.sync_all() {
+                drop(file);
+                let cleanup = temporary.cleanup();
+                return Err(ReplaceError::SyncFile { source, cleanup });
+            }
+        }
+        drop(file);
+
+        let rename_flags = match options.mode {
+            ReplaceMode::Overwrite => 0,
+            ReplaceMode::NoClobber => RENAME_NOREPLACE,
+        };
+        if let Err(error) = renameat2(
+            parent.as_raw_fd(),
+            &temporary.name,
+            parent.as_raw_fd(),
+            &destination,
+            rename_flags,
+        ) {
+            let source = error.into();
+            let cleanup = temporary.cleanup();
+            return Err(ReplaceError::Install { source, cleanup });
+        }
+        temporary.disarm();
+        drop(temporary);
+
+        if options.sync_parent {
+            File::from(parent)
+                .sync_all()
+                .map_err(ReplaceError::SyncParent)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn create_dir(
@@ -1480,6 +1799,76 @@ impl FdJail {
     /// `ErrorKind::AlreadyExists` if the name exists (including as a symlink).
     pub fn create(&self, path: impl AsRef<Path>) -> Result<GuardedFile, JailError> {
         self.open(path, OpenOptions::new().write(true).create_new(true))
+    }
+
+    /// Atomically writes and installs a regular file beneath the pinned jail root.
+    ///
+    /// The destination parent is resolved and pinned before a private temporary
+    /// file is created in that directory. `write` receives that file, and the
+    /// completed file is installed with `renameat2(2)`. A failed write or install
+    /// leaves an existing destination unchanged and removes the temporary file.
+    /// Cleanup is also attempted if `write` panics.
+    ///
+    /// This method uses [`ReplaceOptions::default`]. Use
+    /// [`replace_file_with`](Self::replace_file_with) for no-clobber or durability
+    /// options. Available on Linux x86_64/aarch64.
+    ///
+    /// # Security
+    ///
+    /// The caller must have exclusive mutation authority over the destination
+    /// directory for the duration of this call. If an untrusted process can
+    /// rename entries in that directory, it can substitute the named temporary
+    /// entry before installation. If it can move the pinned parent through
+    /// another writable path, installation follows that directory inode even
+    /// after it leaves the jail. `O_EXCL` and the temporary file's mode do not
+    /// prevent these attacks by another process with directory mutation rights.
+    /// Use a dedicated filesystem or mount without another writable alias and
+    /// restrict directory mutation to the process performing the replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplaceError`] identifying whether creation, writing, syncing,
+    /// installation, or parent-directory syncing failed. If parent-directory
+    /// syncing fails, the replacement has already been installed and may be
+    /// visible even though the operation returned an error.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn replace_file<F>(&self, path: impl AsRef<Path>, write: F) -> Result<(), ReplaceError>
+    where
+        F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    {
+        self.replace_file_with(path, ReplaceOptions::default(), write)
+    }
+
+    /// [`replace_file`](Self::replace_file) with explicit [`ReplaceOptions`].
+    ///
+    /// `ReplaceMode::NoClobber` uses `RENAME_NOREPLACE`, so a destination that
+    /// appears at any point before installation is preserved. The temporary
+    /// file has mode `0o600`, subject to the process umask.
+    ///
+    /// When `sync_parent` is enabled, opening the destination directory requires
+    /// read permission in addition to the permissions needed for replacement.
+    /// The security precondition documented on [`replace_file`](Self::replace_file)
+    /// applies to this method as well.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn replace_file_with<F>(
+        &self,
+        path: impl AsRef<Path>,
+        options: ReplaceOptions,
+        write: F,
+    ) -> Result<(), ReplaceError>
+    where
+        F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    {
+        let path = self
+            .validate_relative(path.as_ref())
+            .map_err(ReplaceError::Create)?;
+        linux_impl::replace_file(&self.dirfd, &path, options, write)
     }
 
     /// Atomically creates a directory beneath the pinned jail root.

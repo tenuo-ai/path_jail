@@ -814,6 +814,164 @@ fn guarded_mutations_stay_beneath_the_jail() {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
+fn replace_file_atomically_overwrites_destination() {
+    use path_jail::guard::ReplaceOptions;
+
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("work")).unwrap();
+    std::fs::write(dir.path().join("work/value.txt"), b"old").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    jail.replace_file_with(
+        "work/value.txt",
+        ReplaceOptions::new().sync_file(true).sync_parent(true),
+        |file| file.write_all(b"new"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(dir.path().join("work/value.txt")).unwrap(),
+        b"new"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("work")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn replace_file_no_clobber_preserves_destination_created_during_write() {
+    use path_jail::guard::{ReplaceError, ReplaceMode, ReplaceOptions};
+
+    let dir = tempdir().unwrap();
+    let destination = dir.path().join("value.txt");
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let error = jail
+        .replace_file_with(
+            "value.txt",
+            ReplaceOptions::new().mode(ReplaceMode::NoClobber),
+            |file| {
+                file.write_all(b"replacement")?;
+                std::fs::write(&destination, b"concurrent")
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ReplaceError::Install { ref source, cleanup: None }
+            if source.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"concurrent");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn replace_file_overwrites_destination_created_during_write() {
+    let dir = tempdir().unwrap();
+    let destination = dir.path().join("value.txt");
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    jail.replace_file("value.txt", |file| {
+        file.write_all(b"replacement")?;
+        std::fs::write(&destination, b"concurrent")
+    })
+    .unwrap();
+
+    assert_eq!(std::fs::read(&destination).unwrap(), b"replacement");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn replace_file_write_failure_preserves_destination_and_cleans_up() {
+    use path_jail::guard::ReplaceError;
+
+    let dir = tempdir().unwrap();
+    let destination = dir.path().join("value.txt");
+    std::fs::write(&destination, b"old").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let error = jail
+        .replace_file("value.txt", |file| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("writer failed"))
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, ReplaceError::Write { cleanup: None, .. }));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn replace_file_panic_cleans_up_temporary_entry() {
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = jail.replace_file("value.txt", |file| -> std::io::Result<()> {
+            file.write_all(b"partial")?;
+            panic!("writer panicked");
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn replace_file_rejects_escaping_and_strict_symlink_parents() {
+    use path_jail::guard::{ReplaceError, ReplaceOptions, ResolveOptions};
+
+    let jail_dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), jail_dir.path().join("escape")).unwrap();
+    std::fs::create_dir(jail_dir.path().join("real")).unwrap();
+    std::os::unix::fs::symlink("real", jail_dir.path().join("alias")).unwrap();
+    let jail = FdJail::new(jail_dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.replace_file("escape/value.txt", |file| file.write_all(b"data")),
+        Err(ReplaceError::Create(JailError::Escape { .. }))
+    ));
+    assert!(matches!(
+        jail.replace_file_with(
+            "alias/value.txt",
+            ReplaceOptions::new().resolve_options(ResolveOptions::new().no_symlinks(true)),
+            |file| file.write_all(b"data"),
+        ),
+        Err(ReplaceError::Create(JailError::SymlinkRejected { .. }))
+    ));
+    assert!(!outside.path().join("value.txt").exists());
+    assert!(!jail_dir.path().join("real/value.txt").exists());
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn create_dir_all_creates_nested_directories_and_is_idempotent() {
     use path_jail::guard::ResolveOptions;
     use std::os::unix::fs::PermissionsExt;

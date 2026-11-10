@@ -77,7 +77,7 @@ This is the single support matrix for the crate; other documents link here.
 | `Jail` (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `secure-open` | ✅ | ✅ | ✅ | ✅ | feature is a no-op | compile error² |
 | `guard`: `FdJail::open` / `create` | ✅ atomic (`toctou_safe = true`) | `FdJail::new` → `UnsupportedKernel` | fallback (`toctou_safe = false`) | fallback (`toctou_safe = false`) | not available | compile error² |
-| `guard`: `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `rename` | ✅ | — | not available³ | not available³ | — | — |
+| `guard`: `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `rename`, `replace_file` | ✅ | — | not available³ | not available³ | — | — |
 | `guard`: `require_regular_file`, `reject_hard_links` | ✅ | — | ✅ | ✅ | — | — |
 | `guard`: `no_symlinks`, `no_xdev` | ✅ enforced | — | no-op | no-op | — | — |
 
@@ -747,6 +747,29 @@ pathname-based fallback would reintroduce the race they are designed to avoid.
 `create_dir_all_with` also accepts an explicit Unix creation mode and
 `ResolveOptions` for rejecting symlinks or mount crossings.
 
+Atomic replacement creates and writes a private temporary file in the pinned
+destination directory, then installs it without exposing partial contents:
+
+<!-- example: doc-examples/examples/migration.rs#replace -->
+```rust
+jail.replace_file_with(
+    name,
+    ReplaceOptions::new().sync_file(true).sync_parent(true),
+    |file| file.write_all(data),
+)?;
+```
+
+`ReplaceMode::NoClobber` preserves a destination that already exists or appears
+while the writer runs. The implementation uses raw syscalls and adds no crate
+dependency.
+
+Replacement requires exclusive mutation authority over the destination
+directory for the duration of the call. Another process that can rename entries
+there can substitute the named temporary file; one that can move the pinned
+parent through another writable path can move the installation outside the
+jail. Use a dedicated filesystem or mount without another writable alias and
+do not share destination-directory mutation rights with untrusted processes.
+
 **Blocked by `openat2`:**
 - Symlink escapes (`/etc` link inside jail) → `JailError::Escape`
 - `..` traversal → `JailError::Escape`
@@ -759,7 +782,7 @@ pathname-based fallback would reintroduce the race they are designed to avoid.
   outside it. `reject_hard_links(true)` → `JailError::HardLinkRejected`, and a
   requested `truncate` is deferred until the check passes. The check is
   point-in-time: a link added between the check and the truncate still sees the
-  file emptied, so write-then-rename when that race matters.
+  file emptied, so `replace_file` should be used when that race matters.
 - FIFOs, directories and device nodes: `require_regular_file(true)` →
   `JailError::FileTypeRejected`. Sockets, and write-only opens of a FIFO with no
   reader, fail in the kernel before a handle exists and return `JailError::Io`. The open uses `O_NONBLOCK`, so a planted FIFO
