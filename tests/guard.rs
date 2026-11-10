@@ -535,6 +535,73 @@ fn invalid_open_option_combinations_are_rejected_consistently() {
     ));
 }
 
+#[test]
+fn read_helpers_return_bytes_and_utf8_text() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("bytes.bin"), [0, 1, 2, 255]).unwrap();
+    std::fs::write(dir.path().join("text.txt"), "hello").unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert_eq!(jail.read("bytes.bin").unwrap(), [0, 1, 2, 255]);
+    assert_eq!(jail.read_to_string("text.txt").unwrap(), "hello");
+}
+
+#[test]
+fn read_to_string_reports_invalid_utf8() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("invalid.txt"), [0xff]).unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.read_to_string("invalid.txt"),
+        Err(JailError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
+#[test]
+fn read_helpers_reject_non_regular_files_without_blocking() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("directory")).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("pipe"))
+        .status()
+        .expect("mkfifo available");
+    assert!(status.success());
+    let jail = FdJail::new(dir.path()).unwrap();
+
+    assert!(matches!(
+        jail.read("directory"),
+        Err(JailError::FileTypeRejected { .. })
+    ));
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(jail.read("pipe"));
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("guarded read blocked on a FIFO");
+    assert!(matches!(result, Err(JailError::FileTypeRejected { .. })));
+}
+
+#[test]
+fn read_helpers_reject_symlink_escape() {
+    let jail_dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        jail_dir.path().join("escape"),
+    )
+    .unwrap();
+    let jail = FdJail::new(jail_dir.path()).unwrap();
+
+    assert!(jail.read("escape").is_err());
+}
+
 // ── Additional: TOCTOU-safe flag ─────────────────────────────────────────────
 
 #[test]
