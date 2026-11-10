@@ -33,7 +33,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! path_jail = { version = "0.5", features = ["guard"] }
+//! path_jail = { version = "0.6", features = ["guard"] }
 //! ```
 //!
 //! ```no_run

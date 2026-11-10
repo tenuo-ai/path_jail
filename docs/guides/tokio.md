@@ -10,7 +10,7 @@ Add Tokio to your own crate (path_jail does not need it):
 
 ```toml
 [dependencies]
-path_jail = { version = "0.5", features = ["guard"] }
+path_jail = { version = "0.6", features = ["guard"] }
 tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "time"] }
 ```
 

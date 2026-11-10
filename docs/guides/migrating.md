@@ -31,7 +31,7 @@ lookup to race. On other Unix targets, the same API falls back to an
 
 ```toml
 [dependencies]
-path_jail = { version = "0.5", features = ["guard"] }
+path_jail = { version = "0.6", features = ["guard"] }
 ```
 
 Create one `FdJail` per root at startup and share it (`Arc<FdJail>` or a
