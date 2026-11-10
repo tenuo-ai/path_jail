@@ -6,6 +6,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pin the jail root as a file descriptor — renames of the root after this
     // point are invisible to the jail.
     let jail = FdJail::new("/var/uploads")?;
+    let capabilities = jail.capabilities();
+    println!("kernel-enforced: {}", capabilities.toctou_safe);
 
     // On Linux 5.6+ x86_64/aarch64: one openat2 syscall, kernel-enforced containment
     let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
@@ -14,7 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Every open captures an Attestation with inode, device, nlink, and timestamp
     let att = jf.attestation();
-    println!("kernel-enforced: {}", att.toctou_safe); // false on the O_NOFOLLOW fallback
     assert!(att.signature.is_none()); // None until you sign it with your own Signer
 
     // Untrusted trees: require a regular file and refuse hard links. Both checks

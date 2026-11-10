@@ -563,6 +563,36 @@ fn toctou_safe_reflects_platform() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn capabilities_reflect_active_backend_before_open() {
+    let dir = tempdir().unwrap();
+    let jail = FdJail::new(dir.path()).unwrap();
+    let capabilities = jail.capabilities();
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        assert!(capabilities.toctou_safe);
+        assert!(capabilities.directory_operations);
+        assert!(capabilities.no_symlinks);
+        assert!(capabilities.no_xdev);
+    }
+
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    {
+        assert!(!capabilities.toctou_safe);
+        assert!(!capabilities.directory_operations);
+        assert!(!capabilities.no_symlinks);
+        assert!(!capabilities.no_xdev);
+    }
+}
+
 // ── no_xdev option ───────────────────────────────────────────────────────────
 
 // The privileged bind-mount behavior is exercised by the ignored test below

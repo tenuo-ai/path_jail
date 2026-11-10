@@ -381,8 +381,9 @@ nothing.
 
 ### `guard` (Unix)
 
-Adds `FdJail`, `GuardedFile`, `OpenOptions` (with the handle checks of §4.9), `ResolveOptions`,
-`FileKind`, `Attestation`, the `Signer`/`Verifier` traits, and the guard `JailError` variants.
+Adds `FdJail`, `GuardCapabilities`, `GuardedFile`, `OpenOptions` (with the handle checks of §4.9),
+`ResolveOptions`, `FileKind`, `Attestation`, the `Signer`/`Verifier` traits, and the guard
+`JailError` variants.
 Opens are atomic and kernel-enforced on Linux 5.6+ x86_64/aarch64 and use the `O_NOFOLLOW`
 fallback on other Unix targets; the guarded mutations of §4.10 exist only on the former.
 

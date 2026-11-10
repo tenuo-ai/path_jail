@@ -698,6 +698,8 @@ use std::io::{Read, Write};
 // Pin the jail root as a file descriptor — renames of the root after this
 // point are invisible to the jail.
 let jail = FdJail::new("/var/uploads")?;
+let capabilities = jail.capabilities();
+println!("kernel-enforced: {}", capabilities.toctou_safe);
 
 // On Linux 5.6+ x86_64/aarch64: one openat2 syscall, kernel-enforced containment
 let mut jf = jail.open("report.pdf", OpenOptions::new().read(true))?;
@@ -706,7 +708,6 @@ jf.read_to_end(&mut buf)?;
 
 // Every open captures an Attestation with inode, device, nlink, and timestamp
 let att = jf.attestation();
-println!("kernel-enforced: {}", att.toctou_safe); // false on the O_NOFOLLOW fallback
 assert!(att.signature.is_none()); // None until you sign it with your own Signer
 
 // Untrusted trees: require a regular file and refuse hard links. Both checks
@@ -727,6 +728,7 @@ out.write_all(b"processed")?;
 **On macOS/BSD and Linux architectures without an `openat2` shim:** falls back
 to an `O_NOFOLLOW`-based open (same protection as `secure-open`).
 `attestation().toctou_safe` will be `false`.
+Use `FdJail::capabilities()` to check the active backend before accepting work.
 
 On Linux x86_64/aarch64, guarded mutations stay fd-relative as well. Recursive
 creation accepts existing directories without requiring write access:

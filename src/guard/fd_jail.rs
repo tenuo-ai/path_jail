@@ -30,6 +30,23 @@ use crate::openat2::{kernel_version as openat2_kernel_version, probe_openat2, MI
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// Capabilities provided by the active [`FdJail`] backend.
+///
+/// Query this after constructing a jail to decide whether the active platform
+/// satisfies the application's threat model before handling untrusted paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GuardCapabilities {
+    /// Guarded opens resolve and open beneath the jail in one kernel operation.
+    pub toctou_safe: bool,
+    /// Guarded directory creation, removal, and rename operations are available.
+    pub directory_operations: bool,
+    /// [`OpenOptions::no_symlinks`] is enforced for every path component.
+    pub no_symlinks: bool,
+    /// [`OpenOptions::no_xdev`] is enforced for every mount crossing.
+    pub no_xdev: bool,
+}
+
 /// A file opened through [`FdJail::open`] or [`FdJail::create`] (guard API).
 ///
 /// Holds both the open file descriptor and attestation data recorded at open
@@ -1257,6 +1274,25 @@ impl FdJail {
                 root_inode: self.root_inode,
                 root_dev: self.root_dev,
             })
+        }
+    }
+
+    /// Returns the guarantees and operations provided by the active backend.
+    ///
+    /// This can be checked at startup, before opening an untrusted path. On
+    /// fallback backends, `no_symlinks` and `no_xdev` are `false`; the final
+    /// component is still protected by `O_NOFOLLOW` as documented for
+    /// [`open`](Self::open), but the options are not enforced for the full path.
+    pub fn capabilities(&self) -> GuardCapabilities {
+        let kernel_enforced = cfg!(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ));
+        GuardCapabilities {
+            toctou_safe: kernel_enforced,
+            directory_operations: kernel_enforced,
+            no_symlinks: kernel_enforced,
+            no_xdev: kernel_enforced,
         }
     }
 
