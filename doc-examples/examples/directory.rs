@@ -4,9 +4,7 @@
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn inspect(
-    jail: &path_jail::guard::FdJail,
-) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+fn inspect(jail: &path_jail::guard::FdJail) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
     use path_jail::guard::OpenOptions;
     use std::io::Read;
 
