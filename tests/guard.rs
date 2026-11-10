@@ -770,6 +770,123 @@ fn guarded_directory_rejects_entry_replaced_with_escaping_symlink() {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_directory_acquisition_resists_concurrent_path_replacement() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let workspace = tempdir().unwrap();
+    let jail_root = workspace.path().join("jail");
+    let selected = jail_root.join("selected");
+    let parked = jail_root.join("parked");
+    let outside = workspace.path().join("outside");
+    std::fs::create_dir_all(&selected).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(selected.join("value.txt"), b"inside").unwrap();
+    std::fs::write(outside.join("value.txt"), b"outside").unwrap();
+    let jail = FdJail::new(&jail_root).unwrap();
+    let running = Arc::new(AtomicBool::new(true));
+    let started = Arc::new(Barrier::new(2));
+
+    let mutator_running = Arc::clone(&running);
+    let mutator_started = Arc::clone(&started);
+    let mutator = std::thread::spawn(move || {
+        for iteration in 0..2_000 {
+            std::fs::rename(&selected, &parked).unwrap();
+            std::os::unix::fs::symlink(&outside, &selected).unwrap();
+            if iteration == 0 {
+                mutator_started.wait();
+            }
+            std::thread::yield_now();
+            std::fs::remove_file(&selected).unwrap();
+            std::fs::rename(&parked, &selected).unwrap();
+            std::thread::yield_now();
+        }
+        mutator_running.store(false, Ordering::Release);
+    });
+
+    started.wait();
+    while running.load(Ordering::Acquire) {
+        let Ok(directory) = jail.open_dir("selected") else {
+            continue;
+        };
+        let Ok(mut file) = directory.open(
+            "value.txt",
+            OpenOptions::new().read(true).require_regular_file(true),
+        ) else {
+            continue;
+        };
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"inside");
+    }
+    mutator.join().unwrap();
+}
+
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn guarded_directory_access_resists_concurrent_entry_replacement() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let workspace = tempdir().unwrap();
+    let jail_root = workspace.path().join("jail");
+    let listing = jail_root.join("listing");
+    let entry = listing.join("entry");
+    let staged = listing.join("staged");
+    let outside = workspace.path().join("outside.txt");
+    std::fs::create_dir_all(&listing).unwrap();
+    std::fs::write(&entry, b"inside").unwrap();
+    std::fs::write(&outside, b"outside").unwrap();
+    let directory = FdJail::new(&jail_root)
+        .unwrap()
+        .open_dir("listing")
+        .unwrap();
+    let running = Arc::new(AtomicBool::new(true));
+    let started = Arc::new(Barrier::new(2));
+
+    let mutator_running = Arc::clone(&running);
+    let mutator_started = Arc::clone(&started);
+    let mutator = std::thread::spawn(move || {
+        for iteration in 0..2_000 {
+            std::os::unix::fs::symlink(&outside, &staged).unwrap();
+            std::fs::rename(&staged, &entry).unwrap();
+            if iteration == 0 {
+                mutator_started.wait();
+            }
+            std::thread::yield_now();
+            std::fs::write(&staged, b"inside").unwrap();
+            std::fs::rename(&staged, &entry).unwrap();
+            std::thread::yield_now();
+        }
+        mutator_running.store(false, Ordering::Release);
+    });
+
+    started.wait();
+    while running.load(Ordering::Acquire) {
+        for candidate in directory.read_dir().unwrap() {
+            let candidate = candidate.unwrap();
+            let Ok(mut file) = directory.open(
+                candidate.file_name(),
+                OpenOptions::new().read(true).require_regular_file(true),
+            ) else {
+                continue;
+            };
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).unwrap();
+            assert_eq!(contents, b"inside");
+        }
+    }
+    mutator.join().unwrap();
+}
+
+#[test]
 #[ignore = "requires root/CAP_SYS_ADMIN; exercised by privileged-tests.yml"]
 #[cfg(all(
     target_os = "linux",
