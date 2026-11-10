@@ -77,6 +77,7 @@ This is the single support matrix for the crate; other documents link here.
 | `Jail` (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `secure-open` | ✅ | ✅ | ✅ | ✅ | feature is a no-op | compile error² |
 | `guard`: `FdJail::open` / `create` | ✅ atomic (`toctou_safe = true`) | `FdJail::new` → `UnsupportedKernel` | fallback (`toctou_safe = false`) | fallback (`toctou_safe = false`) | not available | compile error² |
+| `guard`: `open_dir`, handle-relative iteration/open | ✅ | — | not available³ | not available³ | — | — |
 | `guard`: `create_dir`, `create_dir_all`, `remove_file`, `remove_dir`, `rename`, `replace_file` | ✅ | — | not available³ | not available³ | — | — |
 | `guard`: `require_regular_file`, `reject_hard_links` | ✅ | — | ✅ | ✅ | — | — |
 | `guard`: `no_symlinks`, `no_xdev` | ✅ enforced | — | no-op | no-op | — | — |
@@ -769,6 +770,32 @@ there can substitute the named temporary file; one that can move the pinned
 parent through another writable path can move the installation outside the
 jail. Use a dedicated filesystem or mount without another writable alias and
 do not share destination-directory mutation rights with untrusted processes.
+
+Pinned directory handles keep untrusted entry names away from ambient paths:
+
+<!-- example: doc-examples/examples/directory.rs#iterate -->
+```rust
+let directory = jail.open_dir("incoming")?;
+let mut contents = Vec::new();
+for entry in directory.read_dir()? {
+    let entry = entry?;
+    let mut file = directory.open(
+        entry.file_name(),
+        OpenOptions::new()
+            .read(true)
+            .require_regular_file(true)
+            .reject_hard_links(true),
+    )?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    contents.push(bytes);
+}
+```
+
+Entry names and type hints are snapshots and may change before open. The open
+still resolves beneath the pinned directory and checks the returned handle.
+See [Directory handles](docs/guides/directory-handles.md) for rename and
+platform semantics.
 
 **Blocked by `openat2`:**
 - Symlink escapes (`/etc` link inside jail) → `JailError::Escape`

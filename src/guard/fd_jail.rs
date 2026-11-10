@@ -873,6 +873,7 @@ mod linux_impl {
         jail_root: &Path,
         root_inode: u64,
         rel_path: &Path,
+        reported_path: &Path,
         opts: &OpenOptions,
     ) -> Result<GuardedFile, JailError> {
         // Build the relative CStr path (openat2 requires relative for RESOLVE_BENEATH)
@@ -927,12 +928,12 @@ mod linux_impl {
         };
 
         let owned_fd = openat2(dirfd.as_raw_fd(), &cpath, &how)
-            .map_err(|e| map_errno_to_jail_error(e, rel_path))?;
+            .map_err(|e| map_errno_to_jail_error(e, reported_path))?;
 
         // The fd ownership moves into File so it closes on drop, including
         // when a handle policy rejects it.
         let file: File = File::from(owned_fd);
-        let guarded = finish_open(file, jail_root, root_inode, rel_path, opts, true)?;
+        let guarded = finish_open(file, jail_root, root_inode, reported_path, opts, true)?;
         if opts.open_nonblocking() {
             clear_nonblock(guarded.file.as_raw_fd()).map_err(|e| JailError::Io(e.into()))?;
         }
@@ -1178,6 +1179,18 @@ mod linux_impl {
                 .map_err(ReplaceError::SyncParent)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn guarded_directory(
+        dirfd: &OwnedFd,
+        path: &Path,
+        opts: &ResolveOptions,
+    ) -> Result<OwnedFd, JailError> {
+        open_directory(dirfd, path, opts)
+    }
+
+    pub(crate) fn readable_directory(dirfd: &OwnedFd) -> Result<OwnedFd, JailError> {
+        open_directory_with_flags(dirfd, Path::new("."), &ResolveOptions::default(), O_RDONLY)
     }
 
     pub(crate) fn create_dir(
@@ -1527,6 +1540,278 @@ fn libc_open_directory_flags() -> i32 {
     (O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) as i32
 }
 
+/// A directory pinned beneath an [`FdJail`].
+///
+/// Available on Linux x86_64/aarch64. Subsequent opens resolve relative to the
+/// pinned descriptor with `openat2(RESOLVE_BENEATH)`, so replacing the path
+/// originally used to reach this directory cannot redirect them.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub struct GuardedDir {
+    dirfd: std::os::unix::io::OwnedFd,
+    jail_root: PathBuf,
+    root_inode: u64,
+    opened_path: PathBuf,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl GuardedDir {
+    /// Opens a path beneath this pinned directory.
+    ///
+    /// Entry names returned by [`read_dir`](Self::read_dir) are untrusted and
+    /// may be replaced before this call. The opened object may therefore differ
+    /// from the iterated object, but resolution cannot leave this directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`JailError`] values as [`FdJail::open`].
+    pub fn open(
+        &self,
+        path: impl AsRef<Path>,
+        opts: OpenOptions,
+    ) -> Result<GuardedFile, JailError> {
+        opts.validate()?;
+        let path = validate_handle_relative(path.as_ref())?;
+        let reported_path = self.opened_path.join(&path);
+        linux_impl::jail_open(
+            &self.dirfd,
+            &self.jail_root,
+            self.root_inode,
+            &path,
+            &reported_path,
+            &opts,
+        )
+    }
+
+    /// Returns an iterator over entries in this pinned directory.
+    ///
+    /// `.` and `..` are omitted. Each call uses a fresh directory descriptor,
+    /// so iterators have independent offsets. Names and type hints are snapshots
+    /// from `getdents64` and must be treated as untrusted; use [`open`](Self::open)
+    /// for security-sensitive access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JailError::Io`] if the pinned directory cannot be reopened for
+    /// reading.
+    pub fn read_dir(&self) -> Result<GuardedReadDir, JailError> {
+        let dirfd = linux_impl::readable_directory(&self.dirfd)?;
+        Ok(GuardedReadDir {
+            dirfd,
+            buffer: [0; 8192],
+            position: 0,
+            filled: 0,
+            finished: false,
+        })
+    }
+
+    /// Returns the root-relative path used when this handle was opened.
+    ///
+    /// This is audit metadata, not a path to pass to ambient filesystem APIs.
+    pub fn opened_path(&self) -> &Path {
+        &self.opened_path
+    }
+
+    /// Creates an independent clone without panicking on descriptor exhaustion.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        use std::os::unix::io::AsFd;
+        Ok(Self {
+            dirfd: self.dirfd.as_fd().try_clone_to_owned()?,
+            jail_root: self.jail_root.clone(),
+            root_inode: self.root_inode,
+            opened_path: self.opened_path.clone(),
+        })
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl Clone for GuardedDir {
+    fn clone(&self) -> Self {
+        self.try_clone()
+            .expect("failed to duplicate the pinned directory descriptor")
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl std::fmt::Debug for GuardedDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardedDir")
+            .field("jail_root", &self.jail_root)
+            .field("opened_path", &self.opened_path)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One entry returned by [`GuardedDir::read_dir`].
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardedDirEntry {
+    name: std::ffi::OsString,
+    inode: u64,
+    file_kind_hint: Option<FileKind>,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl GuardedDirEntry {
+    /// Returns the entry's untrusted file name.
+    pub fn file_name(&self) -> &std::ffi::OsStr {
+        &self.name
+    }
+
+    /// Returns the inode number reported by `getdents64`.
+    ///
+    /// The entry can be replaced after iteration; this value is only a hint.
+    pub fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    /// Returns the file-type hint reported by `getdents64`, when available.
+    ///
+    /// Filesystems may return no type, and the entry can be replaced after
+    /// iteration. Open the name through [`GuardedDir::open`] before trusting
+    /// handle metadata.
+    pub fn file_kind_hint(&self) -> Option<FileKind> {
+        self.file_kind_hint
+    }
+}
+
+/// Iterator returned by [`GuardedDir::read_dir`].
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub struct GuardedReadDir {
+    dirfd: std::os::unix::io::OwnedFd,
+    buffer: [u8; 8192],
+    position: usize,
+    filled: usize,
+    finished: bool,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+impl Iterator for GuardedReadDir {
+    type Item = std::io::Result<GuardedDirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::io::AsRawFd;
+
+        loop {
+            if self.position == self.filled {
+                if self.finished {
+                    return None;
+                }
+                match crate::openat2::getdents64(self.dirfd.as_raw_fd(), &mut self.buffer) {
+                    Ok(0) => {
+                        self.finished = true;
+                        return None;
+                    }
+                    Ok(filled) => {
+                        self.position = 0;
+                        self.filled = filled;
+                    }
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(error.into()));
+                    }
+                }
+            }
+
+            let record = &self.buffer[self.position..self.filled];
+            if record.len() < 20 {
+                self.finished = true;
+                return Some(Err(invalid_dirent("directory entry header is truncated")));
+            }
+            let record_len = u16::from_ne_bytes([record[16], record[17]]) as usize;
+            if record_len < 20 || record_len > record.len() {
+                self.finished = true;
+                return Some(Err(invalid_dirent("directory entry length is invalid")));
+            }
+            self.position += record_len;
+
+            let record = &record[..record_len];
+            let Some(name_len) = record[19..].iter().position(|byte| *byte == 0) else {
+                self.finished = true;
+                return Some(Err(invalid_dirent(
+                    "directory entry name is not terminated",
+                )));
+            };
+            let name = &record[19..19 + name_len];
+            let inode = u64::from_ne_bytes(record[..8].try_into().expect("checked dirent header"));
+            if inode == 0 || name == b"." || name == b".." {
+                continue;
+            }
+
+            return Some(Ok(GuardedDirEntry {
+                name: std::ffi::OsString::from_vec(name.to_vec()),
+                inode,
+                file_kind_hint: dirent_file_kind(record[18]),
+            }));
+        }
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn invalid_dirent(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn dirent_file_kind(value: u8) -> Option<FileKind> {
+    match value {
+        0 => None,
+        1 => Some(FileKind::Fifo),
+        2 => Some(FileKind::CharDevice),
+        4 => Some(FileKind::Directory),
+        6 => Some(FileKind::BlockDevice),
+        8 => Some(FileKind::Regular),
+        10 => Some(FileKind::Symlink),
+        12 => Some(FileKind::Socket),
+        _ => Some(FileKind::Unknown),
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn validate_handle_relative(path: &Path) -> Result<PathBuf, JailError> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(JailError::InvalidPath("null bytes not allowed".into()));
+    }
+    if path.is_absolute() {
+        return Err(JailError::InvalidPath("path must be relative".into()));
+    }
+    Ok(path.to_path_buf())
+}
+
 /// A jail pinned to its root directory, for descriptor-returning operations.
 ///
 /// On Linux 5.6+ x86_64/aarch64, [`FdJail::new`] opens the root as a directory
@@ -1778,13 +2063,63 @@ impl FdJail {
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ))]
-        return linux_impl::jail_open(&self.dirfd, &self.root, self.root_inode, &rel, &opts);
+        return linux_impl::jail_open(&self.dirfd, &self.root, self.root_inode, &rel, &rel, &opts);
 
         #[cfg(not(all(
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         )))]
         return fallback_impl::jail_open(&self.root, self.root_inode, &rel, &opts);
+    }
+
+    /// Opens and pins a directory beneath the jail root.
+    ///
+    /// Available on Linux x86_64/aarch64. The path is resolved atomically with
+    /// `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`. The returned
+    /// [`GuardedDir`] supports handle-relative iteration and opens without
+    /// reconstructing an ambient filesystem path.
+    ///
+    /// If the directory is renamed after this call, the handle continues to
+    /// refer to the same inode. This prevents path replacement from redirecting
+    /// later operations, but means a directory moved outside the jail remains
+    /// reachable through an already-open handle.
+    ///
+    /// # Errors
+    ///
+    /// - [`JailError::InvalidPath`] for an absolute path or a null byte.
+    /// - [`JailError::Escape`] / [`JailError::SymlinkRejected`] if resolution
+    ///   leaves the jail or encounters a forbidden symlink.
+    /// - [`JailError::Io`] for OS errors, including a non-directory target.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn open_dir(&self, path: impl AsRef<Path>) -> Result<GuardedDir, JailError> {
+        self.open_dir_with(path, ResolveOptions::default())
+    }
+
+    /// [`open_dir`](Self::open_dir) with explicit [`ResolveOptions`].
+    ///
+    /// `no_xdev` applies while resolving the directory from the jail root.
+    /// Options on a later [`GuardedDir::open`] apply only beneath the already
+    /// pinned directory.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub fn open_dir_with(
+        &self,
+        path: impl AsRef<Path>,
+        opts: ResolveOptions,
+    ) -> Result<GuardedDir, JailError> {
+        let path = self.validate_relative(path.as_ref())?;
+        let dirfd = linux_impl::guarded_directory(&self.dirfd, &path, &opts)?;
+        Ok(GuardedDir {
+            dirfd,
+            jail_root: self.root.clone(),
+            root_inode: self.root_inode,
+            opened_path: path,
+        })
     }
 
     /// Creates a new file relative to the jail root.

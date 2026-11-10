@@ -59,6 +59,7 @@ tradeoffs. Pick the strongest one your environment supports.
 | Bind-mount escape (opt-in)                    | ❌  | ❌  | ✅⁴                 |
 | Atomic open with kernel-enforced containment  | ❌  | ❌  | ✅                  |
 | Atomic fd-relative create/remove/rename       | ❌  | ❌  | ✅⁶                 |
+| Handle-relative directory iteration/open      | ❌  | ❌  | ✅⁸                 |
 | Signed attestation of the open event          | ❌  | ❌  | ✅⁵                 |
 
 Footnotes:
@@ -123,6 +124,11 @@ Footnotes:
    cannot hang the caller. Sockets and write-only FIFOs without a reader fail
    inside the kernel and return `JailError::Io`. Opening a device node can
    still trigger driver side effects before it is rejected.
+8. `FdJail::open_dir` pins a directory beneath the jail; `GuardedDir::read_dir`
+   and `GuardedDir::open` operate through that descriptor. Entry names and type
+   hints are point-in-time snapshots and may be replaced before open, but the
+   later open remains confined beneath the pinned directory. This API is only
+   available on Linux x86_64/aarch64.
 
 ---
 
@@ -136,10 +142,10 @@ These threats are documented as **not defended** by any API:
   misbehaving, or an `openat2` semantic regression in a specific kernel
   version are outside our control. We pin to documented kernel ABI.
 - **Side-channel attacks.** Timing, cache, filesystem-metadata leaks.
-- **Directory iteration (`read_dir`) and recursive walks.** Iterating jail
-  contents has its own TOCTOU surface (rename-during-walk) that we do not
-  currently address. If you walk a directory tree, treat it as untrusted
-  input on every iteration.
+- **Recursive directory walks.** `GuardedDir` safely confines one pinned
+  directory and relative opens beneath it, but the crate does not provide a
+  recursive walker. Entry metadata is still a snapshot; treat every name as
+  untrusted and open it through the directory handle before use.
 - **Windows.** No Windows-specific protections are implemented. `Jail` and
   `secure-open` compile on Windows but provide no defenses beyond the
   cross-platform path-string checks; the `guard` module is Unix-only and is
