@@ -809,7 +809,10 @@ fn guarded_directory_acquisition_resists_concurrent_path_replacement() {
     });
 
     started.wait();
-    while running.load(Ordering::Acquire) {
+    for _ in 0..10_000 {
+        if !running.load(Ordering::Acquire) {
+            break;
+        }
         let Ok(directory) = jail.open_dir("selected") else {
             continue;
         };
@@ -869,7 +872,10 @@ fn guarded_directory_access_resists_concurrent_entry_replacement() {
     });
 
     started.wait();
-    while running.load(Ordering::Acquire) {
+    for _ in 0..10_000 {
+        if !running.load(Ordering::Acquire) {
+            break;
+        }
         for candidate in directory.read_dir().unwrap() {
             let candidate = candidate.unwrap();
             let Ok(mut file) = directory.open(
