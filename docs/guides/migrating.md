@@ -181,6 +181,13 @@ installation. Write, file-sync, and install failures preserve the previous
 destination and report any temporary-file cleanup error. A parent-sync failure
 is reported after installation, so the new file may already be visible.
 
+Only use replacement while the calling process has exclusive mutation
+authority over the destination directory. A concurrent actor with directory
+mutation rights can substitute the named temporary entry, and an actor with
+another writable path to the pinned parent can move that directory outside the
+jail before installation. A dedicated filesystem or mount must not retain a
+separately writable source alias.
+
 ## Error mapping
 
 | `std::fs` error you handled before | guard error |

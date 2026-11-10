@@ -110,6 +110,11 @@ Footnotes:
    tree, use a dedicated filesystem or mount for the jail whose contents are
    not writable through any other path (a bind mount whose source stays
    writable elsewhere is not enough).
+   `replace_file` additionally requires exclusive mutation authority over the
+   destination directory while its writer callback runs. A process that can
+   rename entries there can substitute the named temporary entry before
+   installation. File mode `0o600` does not protect against another process
+   running under the same identity or with elevated privileges.
    They are omitted on fallback targets rather than exposing a racy pathname
    implementation.
 7. Opt in with `OpenOptions::require_regular_file(true)`: a directory, FIFO

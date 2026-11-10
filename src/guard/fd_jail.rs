@@ -1813,6 +1813,18 @@ impl FdJail {
     /// [`replace_file_with`](Self::replace_file_with) for no-clobber or durability
     /// options. Available on Linux x86_64/aarch64.
     ///
+    /// # Security
+    ///
+    /// The caller must have exclusive mutation authority over the destination
+    /// directory for the duration of this call. If an untrusted process can
+    /// rename entries in that directory, it can substitute the named temporary
+    /// entry before installation. If it can move the pinned parent through
+    /// another writable path, installation follows that directory inode even
+    /// after it leaves the jail. `O_EXCL` and the temporary file's mode do not
+    /// prevent these attacks by another process with directory mutation rights.
+    /// Use a dedicated filesystem or mount without another writable alias and
+    /// restrict directory mutation to the process performing the replacement.
+    ///
     /// # Errors
     ///
     /// Returns [`ReplaceError`] identifying whether creation, writing, syncing,
@@ -1838,6 +1850,8 @@ impl FdJail {
     ///
     /// When `sync_parent` is enabled, opening the destination directory requires
     /// read permission in addition to the permissions needed for replacement.
+    /// The security precondition documented on [`replace_file`](Self::replace_file)
+    /// applies to this method as well.
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")

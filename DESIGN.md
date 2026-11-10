@@ -299,6 +299,13 @@ attempt to unlink the temporary entry through the same pinned parent and preserv
 error. Optional parent-directory syncing happens after installation and therefore cannot be
 rolled back if that sync fails.
 
+This workflow requires exclusive mutation authority over the destination directory until the
+rename completes. Linux has no operation that renames an anonymous file over an existing entry,
+and a pre-rename inode check would itself be racy. A process that can rename directory entries can
+therefore substitute the named temporary file; a process that can move the pinned parent through
+another writable alias can move the installation outside the jail. The API documents this as a
+security precondition rather than performing a misleading point-in-time check.
+
 The pinned parent is identified by its inode, not its location. Linux has no beneath-the-root form
 of `mkdirat`, `unlinkat`, or `renameat2`, so if another process moves that directory out of the jail
 between resolution and the syscall, the operation follows it. A check afterwards cannot close this

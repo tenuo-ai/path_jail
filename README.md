@@ -763,6 +763,13 @@ jail.replace_file_with(
 while the writer runs. The implementation uses raw syscalls and adds no crate
 dependency.
 
+Replacement requires exclusive mutation authority over the destination
+directory for the duration of the call. Another process that can rename entries
+there can substitute the named temporary file; one that can move the pinned
+parent through another writable path can move the installation outside the
+jail. Use a dedicated filesystem or mount without another writable alias and
+do not share destination-directory mutation rights with untrusted processes.
+
 **Blocked by `openat2`:**
 - Symlink escapes (`/etc` link inside jail) → `JailError::Escape`
 - `..` traversal → `JailError::Escape`

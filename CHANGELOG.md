@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linux x86_64/aarch64 `FdJail::replace_file` and `replace_file_with` atomically
   install closure-written files beneath a pinned destination parent. Options
   cover overwrite/no-clobber behavior and file/parent syncing; staged errors
-  preserve temporary-file cleanup failures.
+  preserve temporary-file cleanup failures. Callers must retain exclusive
+  mutation authority over the destination directory until installation.
 
 ## [0.5.1] - 2026-10-26
 
